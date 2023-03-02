@@ -1,0 +1,9 @@
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: razorsecure-cloud
+  namespace: default
+spec:
+  chart:
+    spec:
+      version: ">=0.0.1-alpha"

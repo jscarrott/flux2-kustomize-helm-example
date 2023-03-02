@@ -1,0 +1,2584 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: HelmRepository
+metadata:
+  name: bitnami
+  namespace: default
+spec:
+  interval: 24h
+  url: https://charts.bitnami.com/bitnami
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: HelmRepository
+metadata:
+  name: questdb
+  namespace: default
+spec:
+  interval: 24h
+  url: https://helm.questdb.io/
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: postgres
+  namespace: default
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: postgresql
+      version: "12.2.2"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: default
+      interval: 12h
+  values:
+    primary:
+      initdb:
+        scripts:
+          createDB.sql: |
+            CREATE DATABASE "audit";
+            CREATE DATABASE "authentication";
+            CREATE DATABASE "baseline";
+            CREATE DATABASE "main";
+            CREATE DATABASE "alert";
+            CREATE DATABASE "asset-directory";
+            CREATE DATABASE "tickets";
+            CREATE USER authentication WITH PASSWORD '3CUqMBQxKjkg0qCbVPM54GRe8pgYNFYa';
+            GRANT CONNECT ON DATABASE authentication TO  authentication;
+            GRANT USAGE ON SCHEMA public TO authentication;
+            GRANT SELECT, INSERT, UPDATE, CREATE, DELETE ON ALL TABLES IN SCHEMA public TO authentication;
+            alter user authentication with superuser;
+
+    auth:
+      postgresPassword: "mysecretpassword"
+      postgresuser: "postgres"
+      database: "auth"
+
+    image:
+      debug: true
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: rabbitmq
+  namespace: default
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: rabbitmq
+      version: "11.10.1"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: default
+      interval: 12h
+  values:
+    ## Number of replicas
+    replicaCount: 3
+
+    ## Data Persistency
+    persistence:
+      enabled: true
+
+    ## Pod affinity
+    ## Ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity
+
+    # Deploy pods in order so that they can find each other and cluster correctly.
+    podManagementPolicy: OrderedReady
+
+    podAnnotations:
+      ad.datadoghq.com/rabbitmq.check_names: '["rabbitmq"]'
+      ad.datadoghq.com/rabbitmq.init_configs: '[{}]'
+      ad.datadoghq.com/rabbitmq.instances: |
+        [
+          {
+            "rabbitmq_api_url": "%%host%%:15672/api/",
+            "username": "razorsecure",
+            "password": "not-default"
+          }
+        ]
+
+    ## Rabbitmq username, password, and ports.
+    auth:
+      username: razorsecure
+      existingPasswordSecret: credentials
+      existingErlangSecret: credentials
+
+    image:
+      debug: true
+
+    service:
+      ports:
+        amqp: 5672
+        manager: 15672
+      extraPorts:
+        - name: mqtt-tcp
+          port: 1883
+          targetPort: 1883
+
+    ## Extra ports to be included in container spec, primarily informational
+    extraContainerPorts:
+      - name: mqtt
+        containerPort: 1883
+
+    ## Role Based Access
+    ## Ref: https://kubernetes.io/docs/admin/authorization/rbac/
+    ##
+    rbac:
+      create: true
+
+    ## Place any additional plugins to enable in /etc/rabbitmq/enabled_plugins
+    ## Ref: https://www.rabbitmq.com/plugins.html
+    extraPlugins: "rabbitmq_federation rabbitmq_federation_management rabbitmq_shovel rabbitmq_shovel_management rabbitmq_mqtt rabbitmq_auth_backend_http rabbitmq_auth_backend_cache"
+
+    ## The memory threshold under which RabbitMQ will stop reading from client network sockets, in order to avoid being killed by the OS
+    ## ref: https://www.rabbitmq.com/alarms.html
+    ## ref: https://www.rabbitmq.com/memory.html#threshold
+    ##
+    memoryHighWatermark:
+      enabled: true
+      ## Memory high watermark type. Either absolute or relative
+      ##
+      type: relative
+      ## Memory high watermark value.
+      ## The default value of 0.4 stands for 40% of availalbe RAM
+      ## Note: the memory relative limit is applied to the resource.limits.memory to calculate the memory threshold
+      ## You can also use an absolute value, e.g.: 256MB
+      ##
+      value: 0.6
+
+    ## Enable MQTT and set config values for MQTT plugin.
+    ## IMPORTANT AFTER ANY config: in this document you MUST MUST MUST MUST MUST MUST MUST MUST MUST put a | or it won't be copied correctly
+    ## by the chart
+    extraConfiguration: |-
+      mqtt.vhost = /
+      mqtt.exchange = data_enricher
+      mqtt.subscription_ttl = 86400000
+      mqtt.prefetch = 10
+      mqtt.listeners.ssl = none
+      mqtt.listeners.tcp.default = 1883
+      mqtt.tcp_listen_options.backlog = 128
+      mqtt.tcp_listen_options.nodelay = true
+      vm_memory_high_watermark_paging_ratio = 0.05
+      log.default.level = warning
+      auth_backends.1 = cache
+      auth_cache.cache_ttl = 300000
+      auth_cache.cached_backend = http
+      auth_http.http_method   = get
+      auth_http.user_path     = http://authentication-rabbitmq:8088/rabbitmq/auth/user
+      auth_http.vhost_path    = http://authentication-rabbitmq:8088/rabbitmq/auth/vhost
+      auth_http.resource_path = http://authentication-rabbitmq:8088/rabbitmq/auth/resource
+      auth_http.topic_path    = http://authentication-rabbitmq:8088/rabbitmq/auth/topic
+
+    # Force booting is good, it lets rabbitmq actually start up when it isn't shut down in the preferred way
+    clustering:
+      forceBoot: true
+
+    # Paging ratio above set to 4/5 of the high watermark.
+    #  For example: (512*0.8) / 8192
+
+    ## RabbitMQ Memory high watermark
+    ## Ref: http://www.rabbitmq.com/memory.html
+    ##
+
+    ## Set to true to precompile parts of RabbitMQ with HiPE, a just-in-time
+    ## compiler for Erlang. This will increase server throughput at the cost of
+    ## increased startup time. You might see 20-50% better performance at the cost
+    ## of a few minutes delay at startup.
+
+    ## Configure resource requests and limits
+    ## ref: http://kubernetes.io/docs/user-guide/compute-resources/
+    ##
+    resources:
+      requests:
+        cpu: 150m
+        memory: 4Gi
+      limits:
+        memory: 4Gi
+
+    podLabels:
+      app: rabbitmq
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: redis
+  namespace: default
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: redis
+      version: "17.8.2"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: default
+      interval: 12h
+  values:
+    auth:
+      enabled: true
+      existingSecret: "redis-auth"
+      existingSecretPasswordKey: "password"
+
+    master:
+      extraFlags:
+        - "--maxmemory-policy allkeys-lru"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: questdb
+  namespace: default
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: questdb
+      version: "0.28.0"
+      sourceRef:
+        kind: HelmRepository
+        name: questdb
+        namespace: default
+      interval: 12h
+  values:
+    replicaCount: 1
+
+    questdb:
+      config:
+        enabled: true
+        options:
+          line.tcp.commit.interval.default: 30000
+          pg.net.connection.limit: 200
+
+
+    serviceAccount:
+      create: true
+      # name:
+      annotations: {}
+
+    ## Customize liveness, readiness and startup probes
+    ## ref: https://docs.influxdata.com/influxdb/v1.7/tools/api/#ping-http-endpoint
+    ## ref: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+    ##
+    livenessProbe:
+      initialDelaySeconds: 60
+      # timeoutSeconds: 5
+      # scheme: HTTP
+
+    readinessProbe:
+      {}
+      # initialDelaySeconds: 5
+      # timeoutSeconds: 1
+      # scheme: HTTP
+
+    securityContext:
+      {}
+      # runAsUser: 999
+      # runAsGroup: 999
+
+    startupProbe:
+      enabled: false
+      # failureThreshold: 6
+      # periodSeconds: 5
+      # scheme: HTTP
+
+    ## Specify a service type
+    ## NodePort is default
+    ## ref: http://kubernetes.io/docs/user-guide/services/
+    ##
+    service:
+      annotations: {}
+      type: ClusterIP
+      port: 9000
+      expose:
+        postgresql:
+          enabled: true
+          port: 8812
+        influxdb:
+          enabled: true
+          port: 9009
+
+    ## Persist data to a persistent volume
+    ##
+    persistence:
+      enabled: true
+      ## A manually managed Persistent Volume and Claim
+      ## Requires persistence.enabled: true
+      ## If defined, PVC must be created manually before volume will be bound
+      # existingClaim:
+      ## influxdb data Persistent Volume Storage Class
+      ## If defined, storageClassName: <storageClass>
+      ## If set to "-", storageClassName: "", which disables dynamic provisioning
+      ## If undefined (the default) or set to null, no storageClassName spec is
+      ##   set, choosing the default provisioner.  (gp2 on AWS, standard on
+      ##   GKE, AWS & OpenStack)
+      ##
+      storageClassName: "local-path"
+      accessMode: ReadWriteOnce
+      size: 10Gi
+      ##mountPath: /var/lib/influxdbv2
+
+    ## Create default user through Kubernetes job
+    ## Defaults indicated below
+    ##
+    setDefaultUser:
+      enabled: true
+
+      ## Image of the container used for job
+      ## Default: appropriate/curl:latest
+      ##
+      image: appropriate/curl:latest
+
+      ## Deadline for job so it does not retry forever.
+      ## Default: activeDeadline: 300
+      ##
+      activeDeadline: 300
+
+      ## Specify the number of retries before considering job as failed.
+      ## https://kubernetes.io/docs/concepts/workloads/controllers/jobs-run-to-completion/#pod-backoff-failure-policy
+      ##
+      backoffLimit: 6
+
+      ## Hook delete policy for helm.
+      ## Default: hookDeletePolicy: hook-succeeded
+      ##
+      hookDeletePolicy: hook-succeeded
+
+      ## Restart policy for job
+      ## Default: OnFailure
+      restartPolicy: OnFailure
+
+
+    ## Configure resource requests and limits
+    ## ref: http://kubernetes.io/docs/user-guide/compute-resources/
+    resources:
+      requests:
+        memory: 6Gi
+        cpu: 2000m
+
+    # Annotations to be added to InfluxDB pods
+    podAnnotations: {}
+
+    ingress:
+      enabled: false
+      tls: false
+      # secretName: my-tls-cert # only needed if tls above is true
+      hostname: questdb.foobar.com
+      annotations:
+        {}
+        # kubernetes.io/ingress.class: "nginx"
+        # kubernetes.io/tls-acme: "true"
+      path: /
+
+
+    ## Use an alternate scheduler, e.g. "stork".
+    ## ref: https://kubernetes.io/docs/tasks/administer-cluster/configure-multiple-schedulers/
+    ##
+    # schedulerName:
+
+    ## Node labels for pod assignment
+    ## Ref: https://kubernetes.io/docs/user-guide/node-selection/
+    ##
+    nodeSelector: {}
+
+    ## Affinity for pod assignment
+    ## Ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity
+    ##
+    affinity: {}
+
+    ## Tolerations for pod assignment
+    ## Ref: https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/
+    ##
+    tolerations: []
+
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: mariadb
+  namespace: default
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: mariadb
+      version: "11.5.1"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: default
+      interval: 12h
+  values:
+    initdbScripts:
+      10_createDB.sql: |
+          -- MySQL dump 10.13  Distrib 5.5.51-38.1, for Linux (x86_64)
+          --
+          -- Host: localhost    Database: razorsecure
+          -- ------------------------------------------------------
+          -- Server version	5.5.51-38.1
+
+          /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+          /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+          /*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+          /*!40101 SET NAMES utf8 */;
+          /*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+          /*!40103 SET TIME_ZONE='+00:00' */;
+          /*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+          /*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+          /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+          /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+
+          --
+          -- Table structure for table `binaries`
+          --
+
+          DROP TABLE IF EXISTS `binaries`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `binaries` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `command` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `created` datetime NOT NULL,
+            `weighting` float(20,2) NOT NULL DEFAULT '1.00',
+            `interpreter` bigint(20) NOT NULL DEFAULT '0',
+            PRIMARY KEY (`id`),
+            KEY `CommandIndex` (`command`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=6956 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `binary_checksums`
+          --
+
+          DROP TABLE IF EXISTS `binary_checksums`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `binary_checksums` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `binary_id` bigint(20) NOT NULL,
+            `command` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `file_dir` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `distro` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `checksum` varchar(50) COLLATE utf8_unicode_ci NOT NULL,
+            `created` datetime NOT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=7066 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `chart_data`
+          --
+
+          DROP TABLE IF EXISTS `chart_data`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `chart_data` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `chart_id` bigint(20) NOT NULL,
+            `data_full` text COLLATE utf8_unicode_ci,
+            `title_full` text COLLATE utf8_unicode_ci,
+            `data_avg` text COLLATE utf8_unicode_ci,
+            `title_avg` text COLLATE utf8_unicode_ci,
+            `labels_full` text COLLATE utf8_unicode_ci,
+            PRIMARY KEY (`id`),
+            KEY `HostIndex` (`host_id`),
+            KEY `HostCreatedIndex` (`host_id`,`created`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=19 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `chart_type`
+          --
+
+          DROP TABLE IF EXISTS `chart_type`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `chart_type` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `columns` text COLLATE utf8_unicode_ci NOT NULL,
+            `labels` text COLLATE utf8_unicode_ci NOT NULL,
+            `label_points` text COLLATE utf8_unicode_ci NOT NULL,
+            `sort_by` varchar(255) COLLATE utf8_unicode_ci NOT NULL DEFAULT '',
+            `x_label` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `y_label` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `drill_alert_id` bigint(20) DEFAULT NULL,
+            `daily` bigint(20) NOT NULL DEFAULT '1',
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=29 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `command`
+          --
+
+          DROP TABLE IF EXISTS `command`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `command` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `file_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `method_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `display_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `maintenance_time` bigint(20) DEFAULT NULL,
+            `maintenance_monitor_type_id` bigint(20) DEFAULT NULL,
+            `maintenance_reason` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=15 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `current_version`
+          --
+
+          DROP TABLE IF EXISTS `current_version`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `current_version` (
+            `version` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer`
+          --
+
+          DROP TABLE IF EXISTS `customer`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `username` varchar(255) NOT NULL,
+            `password` varchar(255) NOT NULL,
+            `email` varchar(255) NOT NULL,
+            `created` datetime NOT NULL,
+            `features` bigint(20) NOT NULL,
+            `country` varchar(255) NOT NULL,
+            `language` varchar(255) NOT NULL,
+            `currency` varchar(255) NOT NULL,
+            `email_verified` tinyint(4) NOT NULL DEFAULT 0,
+            `verify_code` varchar(255) DEFAULT NULL,
+            `first_paid` datetime DEFAULT NULL,
+            `first_login` datetime DEFAULT NULL,
+            `referrer_id` varchar(255) DEFAULT NULL,
+            `api_code` varchar(255) NOT NULL,
+            `api_key` varchar(255) NOT NULL,
+            `password_reset_hash` varchar(255) DEFAULT NULL,
+            `max_monitors` bigint(20) NOT NULL DEFAULT '5',
+            `ip_address` varchar(255) DEFAULT NULL,
+            `alert_type_id` bigint(20) NOT NULL DEFAULT '1',
+            `alert_frequency` bigint(20) DEFAULT '24',
+            `standard_monitor_free` bigint(20) DEFAULT '15',
+            `premium_monitor_free` bigint(20) NOT NULL DEFAULT '0',
+            `standard_monitor_intent` bigint(20) DEFAULT NULL,
+            `premium_monitor_intent` bigint(20) DEFAULT NULL,
+            `discount` bigint(20) NOT NULL DEFAULT '0',
+            `cancelled_date` datetime DEFAULT NULL,
+            `cef_url` text,
+            `cef_key` mediumtext,
+            `cef_ca_crt` mediumtext,
+            `cef_crt` mediumtext,
+            `cef_enabled` tinyint(4),
+            `demo_toggle` tinyint(4) not null default 0,
+            `locale` varchar(255) NOT NULL DEFAULT 'UTC',
+            `monthly_report_enabled` BOOL DEFAULT False,
+            `fleet_size` smallint DEFAULT 0,
+            `proposed_email` varchar(255),
+            `integrations` mediumtext DEFAULT NULL,
+            `customer_name` varchar(255) DEFAULT NULL,
+            `password_reset_valid_until` DATETIME DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `UserIndex` (`username`),
+            KEY `CreatedIndex` (`created`),
+            KEY `APIIndexCustomer` (`api_key`,`api_code`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=104 DEFAULT CHARSET=utf8;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_email_verification`
+          --
+
+
+          DROP TABLE IF EXISTS `customer_email_verification`;
+
+          CREATE TABLE `customer_email_verification` (
+          `customer_id` bigint(20) NOT NULL,
+          `verification_code` varchar(255),
+          `code_issued_at` datetime NOT NULL,
+          `code_valid_until` datetime NOT NULL,
+          `code_validated_at` datetime,
+          PRIMARY KEY (`customer_id`),
+          FOREIGN KEY (`customer_id`) REFERENCES `customer`(`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+
+
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+
+          --
+          -- Table structure for table `customer_link`
+          --
+
+          DROP TABLE IF EXISTS `customer_link`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_link` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `join_customer_id` bigint(20) NOT NULL,
+            `join_rights` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_log`
+          --
+
+          DROP TABLE IF EXISTS `customer_log`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_log` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `customer_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `action` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `log` text COLLATE utf8_unicode_ci,
+            `user_id` bigint(20) NOT NULL,
+            `alert_id` bigint(20) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`,`created`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=12867 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_notification`
+          --
+
+          DROP TABLE IF EXISTS `customer_notification`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_notification` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `ecustomer_id` bigint(20) NOT NULL,
+            `notification_frequency` bigint(20) NOT NULL DEFAULT '24',
+            `alert_type_id` bigint(20) NOT NULL,
+            `customer_notification_type_id` bigint(20) NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`),
+            KEY `ECustomerIndex` (`ecustomer_id`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_notification_type`
+          --
+
+          DROP TABLE IF EXISTS `customer_notification_type`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_notification_type` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `notification_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `notification_type_id` bigint(20) NOT NULL,
+            `notification_config` text COLLATE utf8_unicode_ci,
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_permissions`
+          --
+
+          DROP TABLE IF EXISTS `customer_permissions`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_permissions` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `ecustomer_id` bigint(20) NOT NULL,
+            `permission_type` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `tag` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`,`ecustomer_id`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_snapshot`
+          --
+
+          DROP TABLE IF EXISTS `customer_snapshot`;
+          CREATE TABLE `customer_snapshot`(
+            `id` bigint(20) not null primary key AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `snap_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `host_tags` json DEFAULT NULL,
+            INDEX CustomerIndex(customer_id)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+          --
+          -- Table structure for table `customer_subscription_item`
+          --
+
+          DROP TABLE IF EXISTS `customer_subscription_item`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_subscription_item` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `start_date` datetime NOT NULL,
+            `end_date` datetime DEFAULT NULL,
+            `included_items` text COLLATE utf8_unicode_ci NOT NULL,
+            `payment_id` bigint(20) DEFAULT NULL,
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            PRIMARY KEY (`id`),
+            KEY `UserIndex` (`customer_id`),
+            KEY `CustomerEndIndex` (`customer_id`,`start_date`,`end_date`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `device_type_lookup`
+          --
+          DROP TABLE IF EXISTS `device_type_lookup`;
+          CREATE TABLE `device_type_lookup` (
+            `mac_wildcard` varchar(20) NOT NULL,
+            `device_type` varchar(255) NOT NULL,
+            `image_name` varchar(255) NOT NULL,
+            PRIMARY KEY (`mac_wildcard`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+          --
+          -- Table structure for table `email_list`
+          --
+
+          DROP TABLE IF EXISTS `email_list`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `email_list` (
+            `email` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `subscribed` bigint(20) DEFAULT '1',
+            PRIMARY KEY (`email`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host`
+          --
+
+          DROP TABLE IF EXISTS `host`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `hostname` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `last_updated` datetime NOT NULL,
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            `log_level` int(3) DEFAULT NULL,
+            `status` varchar(255) COLLATE utf8_unicode_ci DEFAULT 'initialize',
+            `last_heartbeat` datetime DEFAULT NULL,
+            `running` bigint(20) NOT NULL DEFAULT '0',
+            `learning_mode` bigint(20) NOT NULL DEFAULT '0',
+            `learning_end` datetime DEFAULT NULL,
+            `version` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `platform` varchar(3000) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `host_type` bigint(20) NOT NULL DEFAULT '1',
+            `last_chart_date` datetime DEFAULT NULL,
+            `uptime` bigint(20) NOT NULL DEFAULT '0',
+            `host_data` longtext COLLATE utf8_unicode_ci,
+            `encryption_key` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `open_alerts` bigint(20) NOT NULL DEFAULT '0',
+            `resource_alerts` bigint(20) NOT NULL DEFAULT '0',
+            `host_data_hash` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `resource_warnings` bigint(20) NOT NULL DEFAULT '0',
+            `open_warnings` bigint(20) NOT NULL DEFAULT '0',
+            `update_required` bigint(20) NOT NULL DEFAULT '1',
+            `alert_id` bigint(20) DEFAULT NULL,
+            `alert_open` bigint(20) NOT NULL DEFAULT '0',
+            `api_key` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `api_code` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `demo` bigint(20) NOT NULL DEFAULT '0',
+            `baseline_difference` bigint(20) DEFAULT '0',
+            `health` int(11) DEFAULT NULL,
+            `customer_ref` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `mac_address` varchar(256) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `customer_ref_hash` varchar(256) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `skip_included` TINYINT NOT NULL DEFAULT '0',
+            `skip_info` BOOL DEFAULT False,
+            `registered` datetime,
+            PRIMARY KEY (`id`),
+            KEY `UserIndex` (`customer_id`),
+            KEY `LearningEndIndex` (`learning_end`),
+            KEY `APIIndex` (`api_code`,`api_key`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=320 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_alert`
+          --
+
+          DROP TABLE IF EXISTS `host_alert`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_alert` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            `message` longtext COLLATE utf8_unicode_ci,
+            `monitor_table` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `monitor_history_id` bigint(20) DEFAULT NULL,
+            `confirmed` bigint(20) NOT NULL DEFAULT '0',
+            `confirm_customer_id` bigint(20) DEFAULT NULL,
+            `confirm_date` datetime DEFAULT NULL,
+            `notified` bigint(20) NOT NULL DEFAULT '0',
+            `notified_date` datetime DEFAULT NULL,
+            `message_hash` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `alert_type` bigint(20) DEFAULT '1',
+            `last_updated` datetime DEFAULT NULL,
+            `counter` bigint(20) DEFAULT NULL,
+            `version_id` bigint(20) DEFAULT NULL,
+            `maintenance_id` varchar(40) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `alert_group_id` BIGINT(20) DEFAULT NULL,
+            `priority` VARCHAR(255) DEFAULT NULL,
+            `category` INT DEFAULT NULL,
+            `cef_notified` tinyint(4) NOT NULL DEFAULT 0,
+            PRIMARY KEY (`id`),
+            KEY `HostIndex` (`host_id`),
+            KEY `UserIndex` (`customer_id`),
+            KEY `HostAlarmIndex` (`customer_id`,`confirmed`),
+            KEY `HostMonitorIndex` (`host_id`,`monitor_type_id`),
+            KEY `HostMonitorConfirmIndex` (`host_id`,`monitor_type_id`,`confirmed`),
+            KEY `NotifiedIndex` (`notified`),
+            KEY `HostCreatedIndex` (`host_id`,`created`),
+            KEY `HostAlertIndex` (`created`,`customer_id`,`monitor_type_id`),
+            KEY `HostMonIndex2` (`host_id`,`confirmed`),
+            KEY `MonitorConfirmed` (`monitor_id`,`confirmed`),
+            KEY `MonitorCreated` (`monitor_id`,`created`),
+            KEY `MonCustConfirmed` (`customer_id`,`monitor_type_id`,`confirmed`),
+            KEY `CustomerCreated` (`created`,`customer_id`),
+            KEY `VersionIndex` (`version_id`, `host_id`),
+            KEY `HostMonitorConfirmIndex2` (`host_id`,`monitor_type_id`,`confirmed`,`alert_type`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=248704 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER host_alert_i_trig AFTER INSERT ON host_alert
+          FOR EACH ROW
+          BEGIN
+              IF NEW.monitor_id = 0 THEN
+                  UPDATE host SET alert_id=NEW.id, alert_open=1 WHERE id=NEW.host_id;
+              ELSE
+                  UPDATE monitor SET alert_id=NEW.id, alert_open=1, alert_opened=ifnull(alert_opened, now()), alert_type=if(alert_type=0, NEW.alert_type, 0), acknowledged=null WHERE id=NEW.monitor_id AND host_id=NEW.host_id;
+              END IF;
+              INSERT INTO host_alert_log(host_alert_id, created) VALUES (NEW.id, NOW());
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER host_alert_u_trig AFTER UPDATE ON host_alert
+          FOR EACH ROW
+          BEGIN
+              IF NEW.monitor_id = 0 AND NEW.confirmed=1 THEN
+                  UPDATE host SET alert_id=null, alert_open=0 WHERE id=NEW.host_id;
+              ELSEIF NEW.confirmed=1 AND OLD.confirmed=0 THEN
+                  UPDATE monitor SET alert_id=null, alert_open=0, alert_opened=null, alert_type=null, acknowledged=null WHERE id=NEW.monitor_id AND host_id=NEW.host_id;
+              END IF;
+              IF NEW.counter != OLD.counter THEN
+                  INSERT INTO host_alert_log(host_alert_id, created) VALUES (NEW.id, NOW());
+              END IF;
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+
+          --
+          -- Table structure for table `host_alert_group`
+          --
+
+          DROP TABLE IF EXISTS `host_alert_group`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_alert_group` (
+            `id` int(11) NOT NULL AUTO_INCREMENT,
+            `start` datetime NOT NULL,
+            `end` datetime NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_alert_gps`
+          --
+
+          DROP TABLE IF EXISTS `host_alert_gps`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_alert_gps` (
+            `id` bigint(20) NOT NULL,
+            `gps_info` json DEFAULT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `alert_descriptions`
+          --
+
+          DROP TABLE IF EXISTS `alert_descriptions`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `alert_descriptions` (
+            `category_id` INT NOT NULL,
+            `category` VARCHAR(255) NOT NULL,
+            `description` TEXT DEFAULT '',
+            PRIMARY KEY (`category_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `customer_reports`
+          --
+
+          DROP TABLE IF EXISTS `customer_reports`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `customer_reports` (
+            `uid` varchar(255) NOT NULL,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `report_type` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `report_name` varchar(255) COLLATE utf8_unicode_ci,
+            `downloadable` tinyint NOT NULL DEFAULT '0',
+            `view` tinyint NOT NULL DEFAULT '1',
+            `editable` tinyint NOT NULL DEFAULT '0',
+            `metadata` JSON DEFAULT NULL,
+            PRIMARY KEY (`uid`),
+            KEY `HostIndex` (`host_id`),
+            KEY `UserIndex` (`customer_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+          --
+          -- Table structure for table `host_alert`
+          --
+
+          DROP TABLE IF EXISTS `host_alert_maintenance`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_alert_maintenance` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            `message` longtext COLLATE utf8_unicode_ci,
+            `monitor_table` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `monitor_history_id` bigint(20) DEFAULT NULL,
+            `confirmed` bigint(20) NOT NULL DEFAULT '0',
+            `confirm_customer_id` bigint(20) DEFAULT NULL,
+            `confirm_date` datetime DEFAULT NULL,
+            `notified` bigint(20) NOT NULL DEFAULT '0',
+            `notified_date` datetime DEFAULT NULL,
+            `message_hash` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `alert_type` bigint(20) DEFAULT '1',
+            `last_updated` datetime DEFAULT NULL,
+            `counter` bigint(20) DEFAULT NULL,
+            `version_id` bigint(20) DEFAULT NULL,
+            `maintenance_id` int(11) DEFAULT NULL,
+            `alert_group_id` BIGINT(20) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `HostIndex` (`host_id`),
+            KEY `UserIndex` (`customer_id`),
+            KEY `HostAlarmIndex` (`customer_id`,`confirmed`),
+            KEY `HostMonitorIndex` (`host_id`,`monitor_type_id`),
+            KEY `HostMonitorConfirmIndex` (`host_id`,`monitor_type_id`,`confirmed`),
+            KEY `NotifiedIndex` (`notified`),
+            KEY `HostCreatedIndex` (`host_id`,`created`),
+            KEY `HostAlertIndex` (`created`,`customer_id`,`monitor_type_id`),
+            KEY `HostMonIndex2` (`host_id`,`confirmed`),
+            KEY `MonitorConfirmed` (`monitor_id`,`confirmed`),
+            KEY `MonitorCreated` (`monitor_id`,`created`),
+            KEY `MonCustConfirmed` (`customer_id`,`monitor_type_id`,`confirmed`),
+            KEY `CustomerCreated` (`created`,`customer_id`),
+            KEY `VersionIndex` (`version_id`, `host_id`),
+            KEY `HostMonitorConfirmIndex2` (`host_id`,`monitor_type_id`,`confirmed`,`alert_type`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+
+          DROP TABLE IF EXISTS `host_alert_log`;
+          CREATE TABLE host_alert_log(
+          id bigint(20) not null auto_increment primary key,
+          host_alert_id bigint(20) not null,
+          created datetime not null,
+          INDEX AlertIndex(host_alert_id)
+          );
+
+          DROP TABLE IF EXISTS `host_baseline_version_log`;
+          CREATE TABLE host_baseline_version_log(
+          id bigint(20) not null auto_increment primary key,
+          host_baseline_version_id bigint(20) not null,
+          created datetime not null,
+          INDEX VersionIndex(host_baseline_version_id)
+          );
+
+          --
+          -- Table structure for table `host_baseline_master`
+          --
+
+          DROP TABLE IF EXISTS `host_baseline_master`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_baseline_master` (
+            `id` int(11) NOT NULL AUTO_INCREMENT,
+            `host_id` bigint(20) NOT NULL,
+            `created` datetime DEFAULT NULL,
+            `last_update` datetime DEFAULT NULL,
+            `finalized` tinyint(1) DEFAULT 0,
+            `built` tinyint(1) DEFAULT 0,
+            `delivered` tinyint(1) DEFAULT 0,
+            `learning_mode` tinyint(1) DEFAULT 0,
+            PRIMARY KEY (`id`),
+            INDEX HostIndex(host_id)
+          ) ENGINE=InnoDB AUTO_INCREMENT=226 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_baseline_version`
+          --
+
+          DROP TABLE IF EXISTS `host_baseline_version`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_baseline_version` (
+            `id` int(11) NOT NULL AUTO_INCREMENT,
+            `host_id` bigint(20) NOT NULL,
+            `new_hash` varchar(1000) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `old_hash` varchar(1000) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `changes` mediumtext COLLATE utf8_unicode_ci,
+            `created` datetime DEFAULT NULL,
+            `approved` datetime DEFAULT NULL,
+            `rejected` datetime DEFAULT NULL,
+            `file_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `change_hash` varchar(250) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `data_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `version_group` bigint(20) DEFAULT NULL,
+            `counter` int(11) DEFAULT '1',
+            `action` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `master_version_id` bigint(20) DEFAULT NULL,
+            `type` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `source` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            INDEX HostIndex(host_id, monitor_id),
+            INDEX HostVersion(host_id, version_group, id),
+            INDEX VersionIndex(master_version_id, monitor_id)
+          ) ENGINE=InnoDB AUTO_INCREMENT=4231 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_command`
+          --
+
+          DROP TABLE IF EXISTS `host_command`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_command` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `created` datetime NOT NULL,
+            `command_id` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `completed` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `HostUser` (`customer_id`,`host_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=3053 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_error`
+          --
+
+          DROP TABLE IF EXISTS `host_error`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_error` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `customer_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `message` text COLLATE utf8_unicode_ci,
+            `traceback` text COLLATE utf8_unicode_ci,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=887977 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_maintenance`
+          --
+
+          DROP TABLE IF EXISTS `host_maintenance`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_maintenance` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `tag` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `created` datetime DEFAULT NULL,
+            `start` datetime DEFAULT NULL,
+            `completed` datetime DEFAULT NULL,
+            `report_name` varchar(255) COLLATE utf8_unicode_ci,
+            `reason` text COLLATE utf8_unicode_ci,
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            `end` datetime DEFAULT NULL,
+            `start_commands` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `end_commands` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `first_baseline_id` bigint(20) DEFAULT NULL,
+            `last_baseline_id` bigint(20) DEFAULT NULL,
+            `alert_group` bigint(20) DEFAULT NULL,
+            `guid` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `created_by` varchar(20) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `end_alert_group` bigint(20) DEFAULT NULL,
+            `scheduled_start` datetime DEFAULT NULL,
+            `scheduled_end` datetime DEFAULT NULL,
+            `actual_start` datetime DEFAULT NULL,
+            `actual_end` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`),
+            KEY `HostIndex` (`host_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=322 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_required_proc_ignore`
+          --
+
+          DROP TABLE IF EXISTS `host_required_proc_ignore`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_required_proc_ignore` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `host_id` bigint(20) NOT NULL,
+            `created` datetime NOT NULL,
+            `checksum` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `user` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `cmdline1` text COLLATE utf8_unicode_ci NOT NULL,
+            `cmdline2` text COLLATE utf8_unicode_ci NOT NULL,
+            `cmdline_extra` text COLLATE utf8_unicode_ci NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `HostIndex` (`host_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=747 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_resource_alert`
+          --
+
+          DROP TABLE IF EXISTS `host_resource_alert`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_resource_alert` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `parent_alert_id` bigint(20) NOT NULL,
+            `value` float(20,2) NOT NULL,
+            `value_date` datetime NOT NULL,
+            `count` bigint(20) NOT NULL DEFAULT '0',
+            `alert_open` bigint(20) NOT NULL DEFAULT '0',
+            `alert_opened` datetime DEFAULT NULL,
+            `alert_text` text COLLATE utf8_unicode_ci,
+            `alert_type` bigint(20) NOT NULL DEFAULT '1',
+            `notified_date` datetime DEFAULT NULL,
+            `acknowledged` datetime DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `HostParentIndex` (`host_id`,`parent_alert_id`,`name`),
+            KEY `HostOpenIndex` (`host_id`,`alert_open`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=26600 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          DROP TABLE IF EXISTS `host_status_history`;
+          CREATE TABLE host_status_history(
+          id bigint(20) not null primary key auto_increment,
+          host_id bigint(20) not null,
+          created datetime not null,
+          old_status varchar(255),
+          new_status varchar(255),
+          INDEX HostIndex(host_id));
+
+          delimiter ;;
+          CREATE TRIGGER host_update
+          AFTER UPDATE ON host
+          FOR EACH ROW
+          BEGIN
+              IF NEW.status != OLD.status THEN
+                  INSERT INTO host_status_history(host_id, created, old_status, new_status) VALUES (NEW.id, NOW(), OLD.status, NEW.status);
+              END IF;
+          END;;
+          delimiter ;
+
+          --
+          -- Table structure for table `network_config`
+          --
+
+          DROP TABLE IF EXISTS `monitor_config`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_config` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `name` text COLLATE utf8_unicode_ci,
+            `customer_id` bigint(20) not null,
+            `config` json DEFAULT NULL,
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `custid` (`customer_id`),
+            KEY `montypeid` (`monitor_type_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_network_config`
+          --
+
+          DROP TABLE IF EXISTS `host_monitor_config`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_monitor_config` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `host_id` bigint(20) NOT NULL,
+            `monitor_config_id` bigint(20) DEFAULT NULL,
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `hostid` (`host_id`),
+            KEY `monitorconfigid` (`monitor_config_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+
+          --
+          -- Table structure for table `host_tag`
+          --
+
+          DROP TABLE IF EXISTS `host_tag`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_tag` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `host_id` bigint(20) NOT NULL,
+            `tag` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `HostTagIndex` (`host_id`,`tag`),
+            UNIQUE KEY `host_id` (`host_id`,`tag`),
+            KEY `HostIndex` (`host_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=470 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_tag_group`
+          --
+
+          DROP TABLE IF EXISTS `host_tag_group`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_tag_group` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `hosts` bigint(20) NOT NULL DEFAULT '0',
+            `resource_alerts` bigint(20) NOT NULL DEFAULT '0',
+            `open_alerts` bigint(20) NOT NULL DEFAULT '0',
+            `tag` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `sort` bigint(20) NOT NULL,
+            `resource_warnings` bigint(20) NOT NULL DEFAULT '0',
+            `open_warnings` bigint(20) NOT NULL DEFAULT '0',
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `customer_id` (`customer_id`,`tag`),
+            KEY `CustomerIndex` (`customer_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=349 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `host_warning`
+          --
+
+          DROP TABLE IF EXISTS `host_warning`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `host_warning` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            `message` longtext COLLATE utf8_unicode_ci,
+            `monitor_table` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `monitor_history_id` bigint(20) DEFAULT NULL,
+            `confirmed` bigint(20) NOT NULL DEFAULT '0',
+            `confirm_customer_id` bigint(20) DEFAULT NULL,
+            `confirm_date` datetime DEFAULT NULL,
+            `notified` bigint(20) NOT NULL DEFAULT '0',
+            `notified_date` datetime DEFAULT NULL,
+            `message_hash` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `HostIndex` (`host_id`),
+            KEY `UserIndex` (`customer_id`),
+            KEY `HostAlarmIndex` (`customer_id`,`confirmed`),
+            KEY `HostMonitorIndex` (`host_id`,`monitor_type_id`),
+            KEY `HostMonitorConfirmIndex` (`host_id`,`monitor_type_id`,`confirmed`),
+            KEY `NotifiedIndex` (`notified`),
+            KEY `HostCreatedIndex` (`host_id`,`created`),
+            KEY `HostAlertIndex` (`created`,`customer_id`,`monitor_type_id`),
+            KEY `HostMonIndex2` (`host_id`,`confirmed`),
+            KEY `MonitorConfirmed` (`monitor_id`,`confirmed`),
+            KEY `MonitorCreated` (`monitor_id`,`created`),
+            KEY `MonCustConfirmed` (`customer_id`,`monitor_type_id`,`confirmed`),
+            KEY `CustomerCreated` (`created`,`customer_id`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `item_price`
+          --
+
+          DROP TABLE IF EXISTS `item_price`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `item_price` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `item_type` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `currency` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `amount` float(20,2) NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CurrencyIndex` (`currency`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor`
+          --
+
+          DROP TABLE IF EXISTS `monitor`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `host_id` bigint(20) NOT NULL,
+            `monitor_type_id` bigint(20) NOT NULL,
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            `last_seen` datetime DEFAULT NULL,
+            `alert_open` bigint(20) NOT NULL DEFAULT '0',
+            `alert_opened` datetime DEFAULT NULL,
+            `alert_text` text COLLATE utf8_unicode_ci,
+            `alert_type` bigint(20) NOT NULL DEFAULT '1',
+            `notified_date` datetime DEFAULT NULL,
+            `acknowledged` datetime DEFAULT NULL,
+            `alert_id` bigint(20) DEFAULT NULL,
+            `learning` BOOL DEFAULT 0,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `MonitorTypeIndex` (`monitor_type_id`,`host_id`),
+            KEY `HostIndex` (`host_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=4914 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER monitor_insert
+          AFTER INSERT ON monitor
+          FOR EACH ROW
+          BEGIN
+              UPDATE host SET last_updated=now() WHERE id=NEW.host_id;
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER monitor_update
+          AFTER UPDATE ON monitor
+          FOR EACH ROW
+          BEGIN
+              IF NEW.active != OLD.active THEN
+                  UPDATE host SET last_updated=now() WHERE id=OLD.host_id;
+              END IF;
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER monitor_delete
+          AFTER DELETE ON monitor
+          FOR EACH ROW
+          BEGIN
+              UPDATE host SET last_updated=now() WHERE id=OLD.host_id;
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+
+          --
+          -- Table structure for table `monitor_data_check`
+          --
+
+          DROP TABLE IF EXISTS `monitor_data_check`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_data_check` (
+            `count_num` bigint(20) NOT NULL,
+            `hash` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `max_id` bigint(20) DEFAULT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_data_processed`
+          --
+
+          DROP TABLE IF EXISTS `monitor_data_processed`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_data_processed` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `created` datetime NOT NULL,
+            `hash_data` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `gzip` bigint(20) NOT NULL,
+            `length` bigint(20) NOT NULL,
+            `maintenance_id` int(11) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `HashIndex` (`hash_data`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=71667374 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_data_processed_new`
+          --
+
+          DROP TABLE IF EXISTS `monitor_data_processed_new`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_data_processed_new` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `created` datetime NOT NULL,
+            `hash_data` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `gzip` bigint(20) NOT NULL,
+            `length` bigint(20) NOT NULL,
+            `maintenance_id` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `MaintenanceIndex` (`maintenance_id`),
+            KEY `HashIndex` (`hash_data`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=102776196 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_default`
+          --
+
+          DROP TABLE IF EXISTS `monitor_default`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_default` (
+            `monitor_type_id` bigint(20) NOT NULL,
+            `valid_os` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `valid_distro` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_filter`
+          --
+
+          DROP TABLE IF EXISTS `monitor_filter`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_filter` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `cmdline1` text COLLATE utf8_unicode_ci,
+            `cmdline2` text COLLATE utf8_unicode_ci,
+            `cmdline_extra` text COLLATE utf8_unicode_ci,
+            `monitor_type_id` bigint(20) NOT NULL DEFAULT '11',
+            PRIMARY KEY (`id`),
+            KEY `MonitorIndex` (`monitor_id`),
+            KEY `MonitorIndex2` (`monitor_id`,`monitor_type_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=158 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_process_ignore`
+          --
+
+          DROP TABLE IF EXISTS `monitor_process_ignore`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_process_ignore` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_id` bigint(20) DEFAULT NULL,
+            `cmdline1` text COLLATE utf8_unicode_ci,
+            `cmdline2` text COLLATE utf8_unicode_ci,
+            `cmdline_extra` text COLLATE utf8_unicode_ci,
+            `monitor_type_id` bigint(20) NOT NULL DEFAULT '11',
+            PRIMARY KEY (`id`),
+            KEY `MonitorIndex` (`monitor_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=29 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_type`
+          --
+
+          DROP TABLE IF EXISTS `monitor_type`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_type` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `file_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `method_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `real_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `monitor_type` varchar(255) COLLATE utf8_unicode_ci NOT NULL DEFAULT 'realtime',
+            `monitor_interval` bigint(20) NOT NULL DEFAULT '30',
+            `can_add` bigint(20) NOT NULL DEFAULT '1',
+            `monitor_description` text COLLATE utf8_unicode_ci,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `can_edit` bigint(20) DEFAULT '1',
+            `can_custom` bigint(20) DEFAULT '0',
+            `parent_monitor_type_id` bigint(20) DEFAULT NULL,
+            `view_data` bigint(20) NOT NULL DEFAULT '1',
+            `view_data_history` bigint(20) NOT NULL DEFAULT '1',
+            `data_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `header_title` text COLLATE utf8_unicode_ci,
+            `header_vars` text COLLATE utf8_unicode_ci,
+            `can_filter` bigint(20) DEFAULT '0',
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=44 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_type_data`
+          --
+
+          DROP TABLE IF EXISTS `monitor_type_data`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_type_data` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_type_id` bigint(20) NOT NULL,
+            `data_type_id` bigint(20) NOT NULL,
+            `data` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `MonitorTypeIndex` (`monitor_type_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=37 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_type_map`
+          --
+
+          DROP TABLE IF EXISTS `monitor_type_map`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_type_map` (
+            `monitor_type_id` bigint(20) DEFAULT NULL,
+            `data_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `data_type` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_type_variable`
+          --
+
+          DROP TABLE IF EXISTS `monitor_type_variable`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_type_variable` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_type_id` bigint(20) NOT NULL,
+            `name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `value` text COLLATE utf8_unicode_ci,
+            `data_type` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `variable_type` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `valid_os` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `valid_distro` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `TypeIndex` (`monitor_type_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=71 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `monitor_variable`
+          --
+
+          DROP TABLE IF EXISTS `monitor_variable`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `monitor_variable` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `monitor_id` bigint(20) NOT NULL,
+            `name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `value` text COLLATE utf8_unicode_ci,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `MonitorVariable` (`monitor_id`,`name`),
+            KEY `MonitorIndex` (`monitor_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=4132 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER monitor_variable_insert
+          AFTER INSERT ON monitor_variable
+          FOR EACH ROW
+          BEGIN
+              SET @host_id = (select host_id FROM monitor WHERE id=NEW.monitor_id);
+              UPDATE host SET last_updated=now() WHERE id=@host_id;
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          /*!50003 CREATE*/ /*!50003 TRIGGER monitor_variable_update
+          AFTER UPDATE ON monitor_variable
+          FOR EACH ROW
+          BEGIN
+              SET @host_id = (select host_id FROM monitor WHERE id=NEW.monitor_id);
+              IF NEW.value != OLD.value THEN
+                UPDATE host SET last_updated=now() WHERE id=@host_id;
+              END IF;
+          END */;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+
+          --
+          -- Table structure for table `notification_sent`
+          --
+
+          DROP TABLE IF EXISTS `notification_sent`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `notification_sent` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `created` datetime NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `CreatedIndex` (`created`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=11135 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `notification_type`
+          --
+
+          DROP TABLE IF EXISTS `notification_type`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `notification_type` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `type` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `nice_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `config` text COLLATE utf8_unicode_ci,
+            `active` bigint(20) DEFAULT '1',
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `notify_times`
+          --
+
+          DROP TABLE IF EXISTS `notify_times`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `notify_times` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `notify_freq` bigint(20) DEFAULT NULL,
+            `created` datetime NOT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=1121 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `payment`
+          --
+
+          DROP TABLE IF EXISTS `payment`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `payment` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `created` datetime NOT NULL,
+            `included_items` text COLLATE utf8_unicode_ci NOT NULL,
+            `description` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `amount` float(20,2) NOT NULL,
+            `currency` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            `payment_status` bigint(20) DEFAULT NULL,
+            `payment_method_id` bigint(20) DEFAULT NULL,
+            `billed_date` datetime DEFAULT NULL,
+            `last_updated` datetime DEFAULT NULL,
+            `payment_data` text COLLATE utf8_unicode_ci,
+            `number_days` bigint(20) DEFAULT NULL,
+            `discount` bigint(20) NOT NULL DEFAULT '0',
+            `full_amount` float(20,2) NOT NULL DEFAULT '0.00',
+            PRIMARY KEY (`id`),
+            KEY `UserIndex` (`customer_id`,`created`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=49 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `payment_method`
+          --
+
+          DROP TABLE IF EXISTS `payment_method`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `payment_method` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) DEFAULT NULL,
+            `created` datetime NOT NULL,
+            `payment_method_type_id` bigint(20) NOT NULL,
+            `payment_token` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `payment_token_status` bigint(20) NOT NULL DEFAULT '0',
+            `expiry_date` datetime DEFAULT NULL,
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            PRIMARY KEY (`id`),
+            KEY `UserIndex` (`customer_id`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `payment_method_type`
+          --
+
+          DROP TABLE IF EXISTS `payment_method_type`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `payment_method_type` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `permission_type`
+          --
+
+          DROP TABLE IF EXISTS `permission_type`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `permission_type` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `type` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `nice_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `description` text COLLATE utf8_unicode_ci,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `pod`
+          --
+
+          DROP TABLE IF EXISTS `pod`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `pod` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `name` varchar(255) NOT NULL,
+            `pod_group_id` bigint(20) NOT NULL,
+            `pod_position_id` bigint(20) NOT NULL,
+            `image` text,
+            `action` text,
+            `description_text` text,
+            `button_text` varchar(255) NOT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `pod_group`
+          --
+
+          DROP TABLE IF EXISTS `pod_group`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `pod_group` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `name` varchar(255) NOT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `pod_position`
+          --
+
+          DROP TABLE IF EXISTS `pod_position`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `pod_position` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `name` varchar(255) NOT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `referrer`
+          --
+
+          DROP TABLE IF EXISTS `referrer`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `referrer` (
+            `referrer` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `ip_address` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `created` datetime NOT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `site`
+          --
+
+          DROP TABLE IF EXISTS `site`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `site` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `url` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `customer_id` bigint(20) NOT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=15 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `system_chart_label`
+          --
+
+          DROP TABLE IF EXISTS `system_chart_label`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `system_chart_label` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `chart_type_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `monitor_id` bigint(20) NOT NULL,
+            `label_text` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `MonitorTypeIndex` (`monitor_id`,`chart_type_id`,`label_text`),
+            KEY `MonitorCreatedIndex` (`monitor_id`,`host_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=29636504 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `system_data_alert_custom`
+          --
+
+          DROP TABLE IF EXISTS `system_data_alert_custom`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `system_data_alert_custom` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_id` bigint(20) NOT NULL,
+            `host_id` bigint(20) DEFAULT NULL,
+            `parent_alert_id` bigint(20) NOT NULL,
+            `min_value` bigint(20) DEFAULT NULL,
+            `max_value` bigint(20) DEFAULT NULL,
+            `req_count` bigint(20) DEFAULT '0',
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            `min_value_warn` bigint(20) DEFAULT NULL,
+            `max_value_warn` bigint(20) DEFAULT NULL,
+            `req_count_warn` bigint(20) DEFAULT NULL,
+            `can_configure` bigint(20) NOT NULL DEFAULT '1',
+            PRIMARY KEY (`id`),
+            KEY `CustomerIndex` (`customer_id`,`host_id`),
+            KEY `HostParentIndex` (`host_id`,`parent_alert_id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=153 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `system_data_alert_default`
+          --
+
+          DROP TABLE IF EXISTS `system_data_alert_default`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `system_data_alert_default` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `nice_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `resource_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `value_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `min_value` bigint(20) DEFAULT NULL,
+            `max_value` bigint(20) DEFAULT NULL,
+            `req_count` bigint(20) DEFAULT '0',
+            `suffix` varchar(255) COLLATE utf8_unicode_ci DEFAULT '%',
+            `active` bigint(20) NOT NULL DEFAULT '1',
+            `charts` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `min_value_warn` bigint(20) DEFAULT NULL,
+            `max_value_warn` bigint(20) DEFAULT NULL,
+            `req_count_warn` bigint(20) DEFAULT NULL,
+            `can_configure` bigint(20) NOT NULL DEFAULT '1',
+            `valid_os` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            `commands` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=17 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `system_log_history`
+          --
+
+          DROP TABLE IF EXISTS `system_log_history`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `system_log_history` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `created` datetime NOT NULL,
+            `host_id` bigint(20) NOT NULL,
+            `process` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `file_path` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `host` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `message` text COLLATE utf8_unicode_ci,
+            PRIMARY KEY (`id`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=465478 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Table structure for table `testimonial`
+          --
+
+          DROP TABLE IF EXISTS `testimonial`;
+          /*!40101 SET @saved_cs_client     = @@character_set_client */;
+          /*!40101 SET character_set_client = utf8 */;
+          CREATE TABLE `testimonial` (
+            `id` bigint(20) NOT NULL AUTO_INCREMENT,
+            `customer_name` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+            `quote` text COLLATE utf8_unicode_ci,
+            `created` datetime NOT NULL,
+            `approved` bigint(20) NOT NULL DEFAULT '0',
+            PRIMARY KEY (`id`),
+            KEY `ApprovedIndex` (`approved`)
+          ) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+          /*!40101 SET character_set_client = @saved_cs_client */;
+
+          --
+          -- Dumping routines for database 'razorsecure'
+          --
+          /*!50003 DROP PROCEDURE IF EXISTS `customer_tag_recalculate` */;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          CREATE PROCEDURE `customer_tag_recalculate`(IN i_customer_id INT)
+          BEGIN
+              UPDATE host SET open_alerts=(select count(distinct alert_group_id) FROM host_alert WHERE host_id=host.id AND confirmed=0 AND alert_type=1 AND maintenance_id IS Null), resource_alerts=(select count(*) FROM host_resource_alert h WHERE alert_open > 0 AND host_id=host.id AND alert_type=1 AND 0 = (select count(*) FROM system_data_alert_custom sc WHERE h.host_id=sc.host_id and h.parent_alert_id=sc.parent_alert_id and active=0)), open_warnings=(select count(distinct alert_group_id) FROM host_alert WHERE host_id=host.id and confirmed=0 AND alert_type=0), resource_warnings=(select count(*) FROM host_resource_alert h WHERE alert_open > 0 AND host_id=host.id AND alert_type=0 AND 0 = (select count(*) FROM system_data_alert_custom sc WHERE h.host_id=sc.host_id and h.parent_alert_id=sc.parent_alert_id and active=0)) WHERE customer_id=i_customer_id;
+              UPDATE host_tag_group htg SET open_alerts=(select sum(open_alerts) FROM host h, host_tag ht WHERE ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), resource_alerts=(SELECT sum(resource_alerts) FROM host h, host_tag ht WHERE ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), open_warnings=(select sum(open_warnings) FROM host h, host_tag ht where ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), resource_warnings=(select sum(resource_warnings) FROM host h, host_tag ht WHERE ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1) WHERE customer_id=i_customer_id;
+          COMMIT;
+          END ;;
+          DELIMITER ;
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+          /*!50003 DROP PROCEDURE IF EXISTS `host_tag_recalculate` */;
+          /*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+          /*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+          /*!50003 SET @saved_col_connection = @@collation_connection */ ;
+          /*!50003 SET character_set_client  = utf8 */ ;
+          /*!50003 SET character_set_results = utf8 */ ;
+          /*!50003 SET collation_connection  = utf8_general_ci */ ;
+          /*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+          /*!50003 SET sql_mode              = '' */ ;
+          DELIMITER ;;
+          CREATE PROCEDURE `host_tag_recalculate`(IN i_host_id INT, IN i_customer_id INT)
+          BEGIN
+              UPDATE host SET open_alerts=(select count(distinct alert_group_id) FROM host_alert WHERE host_id=host.id and confirmed=0 AND alert_type=1 AND maintenance_id IS Null), resource_alerts=(select count(*) FROM host_resource_alert h WHERE alert_open > 0 AND host_id=host.id AND alert_type=1 AND 0 = (select count(*) FROM system_data_alert_custom sc WHERE h.host_id=sc.host_id and h.parent_alert_id=sc.parent_alert_id and active=0)), open_warnings=(select count(distinct alert_group_id) FROM host_alert WHERE host_id=host.id and confirmed=0 AND alert_type=0), resource_warnings=(select count(*) FROM host_resource_alert h WHERE alert_open > 0 AND host_id=host.id AND  alert_type=0 AND 0 = (select count(*) FROM system_data_alert_custom sc WHERE h.host_id=sc.host_id and h.parent_alert_id=sc.parent_alert_id and active=0)) WHERE id=i_host_id;
+              UPDATE host_tag_group htg SET open_alerts=ifnull((select sum(open_alerts) FROM host h, host_tag ht where ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), 0), resource_alerts=ifnull((select sum(resource_alerts) FROM host h, host_tag ht where ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), 0), open_warnings=ifnull((select sum(open_warnings) FROM host h, host_tag ht where ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), 0), resource_warnings=ifnull((select sum(resource_warnings) FROM host h, host_tag ht where ht.host_id=h.id AND ht.tag=htg.id AND h.customer_id=htg.customer_id AND h.active=1), 0) WHERE customer_id=i_customer_id and htg.tag = 'all';
+          COMMIT;
+          END ;;
+          DELIMITER ;
+
+
+
+          delimiter //
+          CREATE TRIGGER host_baseline_update AFTER UPDATE ON host_baseline_version
+            FOR EACH ROW
+            BEGIN
+                IF NEW.counter != OLD.counter THEN
+                      INSERT INTO host_baseline_version_log(host_baseline_version_id, created) VALUES (NEW.id, NOW());
+                END IF;
+            END;//
+          delimiter ;
+
+
+          delimiter //
+          CREATE TRIGGER host_baseline_insert AFTER INSERT ON host_baseline_version
+            FOR EACH ROW
+            BEGIN
+                INSERT INTO host_baseline_version_log(host_baseline_version_id, created) VALUES (NEW.id, NOW());
+            END;//
+          delimiter ;
+
+          /*!50003 SET sql_mode              = @saved_sql_mode */ ;
+          /*!50003 SET character_set_client  = @saved_cs_client */ ;
+          /*!50003 SET character_set_results = @saved_cs_results */ ;
+          /*!50003 SET collation_connection  = @saved_col_connection */ ;
+          /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+
+          /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+          /*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+          /*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
+          /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+          /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+          /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+          /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+          COMMIT;
+          -- Dump completed on 2017-08-22 15:02:33
+
+      20_populate_data.sql: |
+        -- MySQL dump 10.13  Distrib 5.5.51-38.1, for Linux (x86_64)
+        --
+        -- Host: localhost    Database: razorsecure
+        -- ------------------------------------------------------
+        -- Server version	5.5.51-38.1
+
+        /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+        /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+        /*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+        /*!40101 SET NAMES utf8 */;
+        /*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+        /*!40103 SET TIME_ZONE='+00:00' */;
+        /*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+        /*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+        /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+        /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+
+        --
+        -- Dumping data for table `monitor_default`
+        --
+
+        LOCK TABLES `monitor_default` WRITE;
+        /*!40000 ALTER TABLE `monitor_default` DISABLE KEYS */;
+        INSERT INTO `monitor_default` VALUES (3,NULL,NULL),(4,NULL,NULL),(30,NULL,NULL),(7,NULL,NULL),(8,NULL,NULL),(9,'linux',NULL),(11,NULL,NULL),(20,NULL,NULL),(33,NULL,NULL),(25,NULL,NULL),(37,'windows',NULL),(38,'windows',NULL),(5,NULL,NULL),(6,'linux',NULL),(32,'windows',NULL),(43,'linux',NULL),(46,'linux',NULL);
+        /*!40000 ALTER TABLE `monitor_default` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `monitor_type`
+        --
+
+        LOCK TABLES `monitor_type` WRITE;
+        /*!40000 ALTER TABLE `monitor_type` DISABLE KEYS */;
+
+        INSERT INTO `monitor_type` VALUES (0,'filemon','monitor_filesystem','Server Info','file',120,0,'Server Resource Monitoring',NULL,0,0,NULL,0,0,'live_files','[\"Created\", \"Action\", \"File Path\"]','[\"created\", \"action\", \"file_path\"]',1),
+                                          (3,'filemon','monitor_filesystem','File Monitor','file',120,1,'Monitor a specific directory or file for changes',NULL,0,0,NULL,1,1,'live_files','[\"Created\", \"Action\", \"File Path\"]','[\"created\", \"action\", \"file_path\"]',1),
+                                          (4,'networkmon_ports','monitor_port','Listening Ports','interval',120,1,'Monitor listening network ports',NULL,0,0,NULL,1,1,'network_ports','[\"Created\", \"Action\", \"Port\", \"User\", \"Process Command\"]','[\"created\", \"action\", \"port\", \"user\", \"process_cmd\"]',0),
+                                          (5,'packagemon','monitor_packages','Installed Packages','interval',120,1,'Monitor installed packages',NULL,0,0,NULL,1,1,'packages','[\"Created\", \"Action\", \"Name\", \"Arch\", \"Version\"]','[\"created\", \"action\", \"name\", \"arch\", \"version\"]',0),
+                                          (6,'packagemon','monitor_repos','Package Repositories','interval',120,1,'Monitor installed package repositories',NULL,0,0,NULL,1,1,'repos','[\"Created\", \"Action\", \"Name\", \"Base URL\"]','[\"created\", \"action\", \"name\", \"base_url\"]',0),
+                                          (7,'systemmon','monitor_system','System Monitor','interval',120,1,'Monitor basic system information, disk mounts and devices',NULL,0,0,NULL,0,0,'system_devices','[\"Created\", \"Action\", \"Data\"]','[\"created\", \"action\", \"data\"]',0),
+                                          (8,'usermon','monitor_user','User Auth Monitor','realtime',120,1,'Monitor user logins via ssh, new users and new hosts will be alerted',NULL,0,0,NULL,1,1,'users_all','[\"Created\", \"Action\", \"Username\", \"Host\"]','[\"created\", \"action\", \"username\", \"host\"]',0),
+                                          (9,'networkmon_iptables','monitor_iptables','IPTables Firewall Rules','interval',120,1,'Monitor IPTables rules. New or deleted rules will be alerted',NULL,0,0,NULL,1,1,'iptables','[\"Created\", \"Action\", \"Rule\"]','[\"created\", \"action\", \"rule\"]',0),
+                                          (10,'selinuxmon','monitor_selinux','Selinux Setting','interval',120,1,'Monitor changes to SELinux. Changes will be alerted',NULL,0,0,NULL,0,0,'selinux','[\"Created\", \"Action\", \"Data\"]','[\"created\", \"action\", \"data\"]',0),
+                                          (11,'processmon','monitor_processes','Process Monitor','interval',120,1,'Monitor running processes. Any unrecognised processes will be alerted',NULL,0,0,NULL,1,1,'procs_all','[\"Created\", \"Action\", \"Username\", \"Process Command\", \"Checksum\"]','[\"created\", \"action\", \"username\", \"process_cmd\", \"checksum\"]',2),
+                                          (28,'filemon','monitor_filesystem','Test File Monitor','file',120,1,'Monitor a specific direct',1,1,0,3,1,1,'live_files','[\"Created\", \"Action\", \"File Path\"]','[\"created\", \"action\", \"file_path\"]',1),
+                                          (19,'filemon','monitor_filesystem','Website Files','file',0,1,'Monitor the files in the webserver directory',3,1,0,3,1,1,'live_files','[\"Created\", \"Action\", \"File Path\"]','[\"created\", \"action\", \"file_path\"]',1),
+                                          (20,'sysreport','monitor_sysreport','System Resources','interval',60,0,'Monitor your system resources',NULL,0,0,NULL,0,0,NULL,NULL,NULL,0),
+                                          (21,'timemon','monitor_time','Time Monitor','interval',0,1,'Monitor for changes to server time',NULL,0,0,NULL,0,0,NULL,NULL,NULL,0),
+                                          (22,'honeymon','monitor_honeypot','Port Scan Monitor','directthread',0,0,'Monitor for server port scans',NULL,0,0,NULL,0,0,NULL,NULL,NULL,0),
+                                          (23,'logmon','monitor_weblog','Web Log Monitor','directthread',0,1,'Monitor for the web logs for resource usage',NULL,1,0,NULL,0,0,NULL,NULL,NULL,0),
+                                          (24,'webmon','monitor_web','Remote Web Uptime Monitor','remote',0,0,'Monitor a website for uptime',NULL,1,0,NULL,0,0,NULL,NULL,NULL,0),
+                                          (25,'syslogmon','monitor_syslog','Centralized System Log','directthread',0,1,'Push your system logs to Razorsecure for centralized logging and alerts',NULL,0,0,NULL,1,0,'syslog_all_{date}','[\"Created\", \"Process\", \"File Path\", \"Host\", \"Message\"]','[\"created\", \"process\", \"file_path\", \"host\", \"message\"]',3),
+                                          (1,'detectmon','monitor_detect','RazorSecure Self Monitor','file',0,0,'Server Resource Monitoring',NULL,0,0,NULL,0,0,NULL,NULL,NULL,0),
+                                          (26,'filemon','monitor_filesystem','Web File Monitor','file',120,1,'Monitor your web server files, this will be auto configured based on detection',NULL,0,0,NULL,1,1,'live_files','[\"Created\", \"Action\", \"File Path\"]','[\"created\", \"action\", \"file_path\"]',1),
+                                          (27,'packagemon','monitor_updates','Package Update Monitor','interval',600,1,'Monitors your package manager and will inform you when updates are available for your server',NULL,0,0,NULL,0,1,'updates',NULL,'[\"created\", \"action\", \"name\", \"arch\", \"version\"]',0),
+                                          (30,'cronmon','monitor_cron','Cron Jobs','realtime',120,1,'Monitor configured cron jobs',NULL,0,0,NULL,1,1,'jobs','[\"Created\", \"Action\", \"Username\", \"Host\"]','[\"created\", \"action\", \"username\", \"host\"]',0),
+                                          (31,'dellmon','monitor_hardware','Dell Hardware Monitor','interval',600,1,'Monitor Dell OMSA Reports',1,0,0,NULL,1,1,'jobs','[\"Created\", \"Action\", \"Username\", \"Host\"]','[\"created\", \"action\", \"username\", \"host\"]',0),
+                                          (32,'auditmon','monitor_auditlog','Process Monitor','directthread',600,1,'Monitors audit log for new processes',NULL,0,0,NULL,0,1,'audit_logs','[\"Created\", \"Action\", \"Username\", \"Process\"]','[\"created\", \"action\", \"username\", \"process_cmd\"]',0),
+                                          (33,'usermon','monitor_user_groups','User Group Monitor','interval',60,1,'Monitor User creation and groups',NULL,0,0,NULL,1,1,'user_groups','[\"Created\", \"Action\", \"Username\", \"Host\"]','[\"created\", \"action\", \"username\", \"host\"]',0),
+                                          (34,'mysqlreport','monitor_mysql_status','MySQL Status Monitor','interval',60,1,'Monitor resource usage on the MySQL database',NULL,0,0,NULL,0,1,'mysql_resource','[\"Created\", \"Action\", \"Username\", \"Host\"]','[\"created\", \"action\", \"username\", \"host\"]',0),
+                                          (35,'huntermon','monitor_rkhunter','RKHunter Monitoring','interval',43200,1,'Automatic RKHunter Monitoring',NULL,0,0,NULL,1,0,'rkhunter','[\"Created\", \"Info\"]','[\"created\", \"info\"]',0),
+                                          (36,'huntermon','monitor_chkrootkit','Chkrootkit Monitoring','interval',43200,0,'Automatic Chkrootkit monitoring',NULL,0,0,NULL,1,0,'chkrootkit','[\"Created\", \"Info\"]','[\"created\", \"info\"]',0),
+                                          (37,'servicemon','monitor_services','Windows Service Monitoring','interval',120,1,'Monitor the configured Windows Services, this will alert on any changes to the services',NULL,0,0,NULL,1,0,'services','[\"Created\", \"Info\"]','[\"created\", \"info\"]',0),
+                                          (38,'networkmon','monitor_firewall','Windows Firewall Monitoring','interval',120,1,'Monitor the configured Windows Firewall, this will alert on any changes to the services',NULL,0,0,NULL,1,0,'services','[\"Created\", \"Info\"]','[\"created\", \"info\"]',0),
+                                          (39,'rabbitmqmon','monitor_rabbitmq','RabbitMQ Monitor','interval',60,1,'Monitor RabbitMQ Status',NULL,0,0,NULL,0,1,'rabbitmq','[\"Created\", \"Action\", \"Username\", \"Host\"]','[\"created\", \"action\", \"username\", \"host\"]',0),
+                                          (40,'wifimon','monitor_wifi','Wifi Monitoring','directthread',600,1,'Monitors wifi hotspots and infrastructure',NULL,0,0,NULL,0,1,'wifi_logs','[\"Created\", \"Ping\", \"Longitude\", \"Latitude\"]','[\"created\", \"ping\", \"longitude\", \"latitude\"]',0),
+                                          (41,'mysqlmon','monitor_mysql','MySQL Query Monitor','directthread',60,0,'Monitor database queries for MySQL',NULL,0,0,NULL,0,1,'mysql_queries','[]','[]',0),
+                                          (42,'lockdownmon','monitor_lockdown','Alert Mode Status','fake',30,1,'Alert Mode Status Monitor',NULL,1,0,NULL,1,1,NULL,NULL,NULL,0),
+                                          (43,'networkmon_rt','monitor_sniffer','Network Port Monitor','directthread',30,1,'Monitors Network Ports',NULL,1,0,NULL,1,1,'network_routes',NULL,NULL,0),
+                                          (44,'usbmon','all_device_monitor','All Usb Monitor','interval',1800,1,'Monitors all USB devices connected to the client',NULL,1,0,NULL,0,1,'usb_devices','["Created", "Action", "Info"]','["created", "action", "info"]',0),
+                                          (45,'usbmon','usb_threading_monitor','Usb monitoring thread','directthread',0,1,'Thread that monitors all usb adds/removes/changes',NULL,1,0,NULL,0,1,'usb_thread_data','["Created","Action","Info"]','["created","action","info"]',0),
+                                          (46,'processhealthmon','monitor_prochealth','Process health monitor','interval',60,1,'Monitors process relevant data, like loaded libraries, uptime, memory usage, etc.',NULL,1,0,NULL,0,0,'prochealth_data','["Created","Action","Info"]','["created","action","info"]',0),
+                                          (47,'locationmon','gps_threading_monitor','GPS monitor','directthread',0,1,'Monitors GPS location data and reports spoofing attempts.',NULL,1,0,NULL,0,1,'gps_update','["Created", "Action", "Info"]','["created", "action", "info"]',0),
+                                          (48,'iptableslog','log_iptables','IPTables Logging','interval',60,1,'Logs the IPTables Changes',NULL,1,0,NULL,0,0,'iptables_log','["Created","Action","Info"]','["created","action","info"]',0),
+                                          (49,'hostmon','monitor_host_file','Host monitor thread','directthread',0,1,'Thread that monitors all host file changes',NULL,1,0,NULL,0,1,'host_data','["Created","Action","Info"]','["created","action","info"]',0),
+                                          (50,'arpmon','arp_start','ARP Monitor', 'directthread',0,1,'Monitors ARP packets and cache',NULL,1,0,NULL,0,1,'arp_data','["Created","Action","Info"]','["created","action","info"]',4),
+                                          (51,'snmpmon','monitor_snmp_agent','SNMP Monitor', 'interval',60,1,'Monitors SNMP-enabled devices on the network of the parent host',NULL,1,0,NULL,0,0,'snmp_agent_data','["Created","Action","Info"]','["created","action","info"]',0),
+                                          (52,'pingmon','ping_threading_monitor','Ping monitor', 'directthread',60,1,'Pings other devices on the network and returns metrics around the response times.',NULL,1,0,NULL,0,0,NULL,NULL,NULL,0);
+
+        /*!40000 ALTER TABLE `monitor_type` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `monitor_type_data`
+        --
+
+        LOCK TABLES `monitor_type_data` WRITE;
+        /*!40000 ALTER TABLE `monitor_type_data` DISABLE KEYS */;
+        INSERT INTO `monitor_type_data` VALUES (1,16,1,'txt'),(2,16,1,'log'),(3,16,1,'out'),(24,18,1,'txt'),(25,18,1,'log'),(26,18,1,'out'),(27,17,1,'txt'),(28,17,1,'log'),(29,17,1,'tmp'),(30,17,2,'/tmp'),(31,17,2,'/proc'),(32,17,3,'/tmp'),(33,17,3,'/proc'),(34,26,1,'txt'),(35,26,1,'out'),(36,26,1,'log');
+        /*!40000 ALTER TABLE `monitor_type_data` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `monitor_type_map`
+        --
+
+        LOCK TABLES `monitor_type_map` WRITE;
+        /*!40000 ALTER TABLE `monitor_type_map` DISABLE KEYS */;
+        INSERT INTO `monitor_type_map` VALUES (3,'live_files','set'),(3,'live_files_info','dict'),(3,'live_files_noinfo','set'),(4,'network_ports','set'),(30,'jobs','set'),(7,'system_devices','dict'),(8,'users_all','set'),(9,'iptables','set'),(11,'procs_all','set'),(11,'procs_checksums','list'),(11,'procs_cmd','list'),(20,'active_processes','set'),(20,'active_procs','set'),(20,'required_proc_missing','set'),(20,'required_procs','set'),(33,'user_groups','set'),(33,'user_list','set'),(41,'mysql_queries','set');
+        /*!40000 ALTER TABLE `monitor_type_map` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `monitor_filter`
+        --
+
+        LOCK TABLES `monitor_filter` WRITE;
+        /*!40000 ALTER TABLE `monitor_filter` DISABLE KEYS */;
+        INSERT INTO `monitor_filter` VALUES (26,508,'/funcom/local/html/htdocs-bugserver/batchtmp/','','',26),(2,NULL,'/usr/bin/atop',NULL,NULL,11),(4,NULL,'/usr/sbin/exim',NULL,NULL,11),(18,10,'/usr/lib64/pypy-2.0.2/pypy','do_combat_nova.py','',11),(24,10,'/usr/lib64/pypy-2.0.2/pypy','http_sim_nova2.py','',11),(23,10,'/usr/lib64/pypy-2.0.2/pypy','http_sim_nova1.py','',11),(12,NULL,'-bash',NULL,NULL,11),(13,NULL,'/usr/sbin/anacron',NULL,NULL,11),(14,NULL,'/bin/sleep',NULL,NULL,11),(15,NULL,'sleep',NULL,NULL,11),(16,NULL,'/usr/bin/md5sum',NULL,NULL,11),(19,10,'/usr/lib64/pypy-2.0.2/pypy','http_sim4.py','',11),(20,10,'/usr/lib64/pypy-2.0.2/pypy','http_sim5.py','',11),(21,10,'/usr/lib64/pypy-2.0.2/pypy','http_sim6.py','',11),(22,10,'/usr/lib64/pypy-2.0.2/pypy','http_sim7.py','',11),(27,508,'/funcom/local/html/htdocs-bugserver/incoming/','','',26),(28,508,'/funcom/local/html/htdocs-bugserver/outgoing','','',26),(29,508,'/funcom/local/html/htdocs-bugserver/batches/','','',26),(34,NULL,'/opt/dell/srvadmin/bin/omreport',NULL,NULL,11),(32,508,'/funcom/local/html/htdocs-bugserver/reports/','','',26),(33,508,'/funcom/local/html/htdocs-bugserver/complete/','','',26),(35,NULL,'/opt/dell/srvadmin/sbin/omcliproxy',NULL,NULL,11),(36,535,'/funcom/local/html/htdocs-funcom-live/system/expressionengine/cache/page_cache','','',26),(37,517,'/funcom/local/html/stage_lego/sites/default/files/css/css','','',26),(38,517,'/funcom/local/html/stage_lego/sites/default/files/js/js','','',26),(39,NULL,'logger',NULL,NULL,11),(40,NULL,'/sbin/ausearch',NULL,NULL,11),(41,NULL,'/usr/sbin/tmpwatch',NULL,NULL,11),(42,NULL,'/opt/dell/srvadmin/sbin/omreport',NULL,NULL,11),(43,NULL,'/usr/sbin/prelink',NULL,NULL,11),(45,535,'/funcom/local/html/htdocs-funcom-live/system/expressionengine/cache','','',26),(46,518,'/global/servers/apache/htdocs/cache/com_acesef','','',26),(47,1183,'/var/www/html/cache','','',26),(48,830,'/usr/lib64/erlang/erts-5.8.5/bin/child_setup',NULL,NULL,11),(49,NULL,'/bin/logger',NULL,NULL,11),(50,NULL,'/usr/libexec/postfix/pickup',NULL,NULL,11),(51,NULL,'/usr/bin/abrt-dump-oops',NULL,NULL,11),(52,512,'/funcom/servers/msgs/html/patchnotes','','',26),(53,535,'/funcom/local/html/htdocs-funcom-stage/system/expressionengine/cache/page_cache','','',26),(56,NULL,'/sbin/dhclient',NULL,NULL,11),(55,NULL,'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',NULL,NULL,11),(57,NULL,'/usr/bin/expr',NULL,NULL,11),(58,NULL,'C:\\Windows\\System32\\conhost.exe',NULL,NULL,11),(59,NULL,'C:\\Windows\\SysWOW64\\rundll32.exe',NULL,NULL,11),(60,NULL,'C:\\Windows\\SysWOW64\\dllhost.exe',NULL,NULL,11),(61,1819,'/usr/lib/squid3/log_file_daemon','','',11),(63,NULL,'/bin/cut',NULL,NULL,11),(64,NULL,'/bin/renice',NULL,NULL,11),(65,NULL,'/bin/find',NULL,NULL,11),(66,NULL,'/bin/ionice',NULL,NULL,11),(67,NULL,'/bin/sed',NULL,NULL,11),(68,NULL,'/bin/nice',NULL,NULL,11),(69,NULL,'/bin/basename',NULL,NULL,11),(70,NULL,'/bin/gawk',NULL,NULL,11),(71,NULL,'/bin/cat',NULL,NULL,11),(72,NULL,'/bin/touch',NULL,NULL,11),(73,NULL,'/usr/bin/ionice',NULL,NULL,11),(74,NULL,'/usr/bin/renice',NULL,NULL,11),(79,2152,'/funcom/servers/mail/attachments','','',26),(76,161,'/funcom/local/html/htdocs-bugserver/incoming','','',3),(77,2152,'/chardata','','',26),(78,2152,'/chronicle','','',26),(80,2452,'/usr/bin/Xvfb','','',11),(81,2469,'/usr/bin/Xvfb','','',11),(82,2419,'/usr/bin/Xvfb','','',11),(83,2685,'/usr/bin/Xvfb',NULL,NULL,11),(84,2701,'/usr/bin/Xvfb',NULL,NULL,11),(85,2716,'/usr/bin/Xvfb',NULL,NULL,11),(86,2733,'/usr/bin/Xvfb',NULL,NULL,11),(87,2751,'/usr/bin/Xvfb',NULL,NULL,11),(88,2769,'/usr/bin/Xvfb',NULL,NULL,11),(89,2786,'/usr/bin/Xvfb',NULL,NULL,11),(90,2802,'/usr/bin/Xvfb',NULL,NULL,11),(91,2818,'/usr/bin/Xvfb',NULL,NULL,11),(92,2834,'/usr/bin/Xvfb',NULL,NULL,11),(93,2850,'/usr/bin/Xvfb',NULL,NULL,11),(94,2866,'/usr/bin/Xvfb',NULL,NULL,11),(95,2882,'/usr/bin/Xvfb',NULL,NULL,11),(96,2898,'/usr/bin/Xvfb',NULL,NULL,11),(97,2914,'/usr/bin/Xvfb',NULL,NULL,11),(98,2927,'/usr/bin/Xvfb',NULL,NULL,11),(99,2928,'/usr/bin/Xvfb',NULL,NULL,11),(100,2929,'/usr/bin/Xvfb',NULL,NULL,11),(101,2930,'/usr/bin/Xvfb',NULL,NULL,11),(102,2931,'/usr/bin/Xvfb',NULL,NULL,11),(103,2932,'/usr/bin/Xvfb',NULL,NULL,11),(104,2933,'/usr/bin/Xvfb',NULL,NULL,11),(105,2452,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(106,2469,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(107,2419,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(108,2685,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(109,2701,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(110,2716,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(111,2733,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(112,2751,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(113,2769,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(114,2786,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(115,2802,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(116,2818,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(117,2834,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(118,2850,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(119,2866,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(120,2882,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(121,2898,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(122,2914,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(123,2927,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(124,2928,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(125,2929,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(126,2930,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(127,2931,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(128,2932,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(129,2933,'/usr/lib/firefox-esr/firefox-esr',NULL,NULL,11),(130,2452,'/usr/local/bin/geckodriver',NULL,NULL,11),(131,2469,'/usr/local/bin/geckodriver',NULL,NULL,11),(132,2419,'/usr/local/bin/geckodriver',NULL,NULL,11),(133,2685,'/usr/local/bin/geckodriver',NULL,NULL,11),(134,2701,'/usr/local/bin/geckodriver',NULL,NULL,11),(135,2716,'/usr/local/bin/geckodriver',NULL,NULL,11),(136,2733,'/usr/local/bin/geckodriver',NULL,NULL,11),(137,2751,'/usr/local/bin/geckodriver',NULL,NULL,11),(138,2769,'/usr/local/bin/geckodriver',NULL,NULL,11),(139,2786,'/usr/local/bin/geckodriver',NULL,NULL,11),(140,2802,'/usr/local/bin/geckodriver',NULL,NULL,11),(141,2818,'/usr/local/bin/geckodriver',NULL,NULL,11),(142,2834,'/usr/local/bin/geckodriver',NULL,NULL,11),(143,2850,'/usr/local/bin/geckodriver',NULL,NULL,11),(144,2866,'/usr/local/bin/geckodriver',NULL,NULL,11),(145,2882,'/usr/local/bin/geckodriver',NULL,NULL,11),(146,2898,'/usr/local/bin/geckodriver',NULL,NULL,11),(147,2914,'/usr/local/bin/geckodriver',NULL,NULL,11),(148,2927,'/usr/local/bin/geckodriver',NULL,NULL,11),(149,2928,'/usr/local/bin/geckodriver',NULL,NULL,11),(150,2929,'/usr/local/bin/geckodriver',NULL,NULL,11),(151,2930,'/usr/local/bin/geckodriver',NULL,NULL,11),(152,2931,'/usr/local/bin/geckodriver',NULL,NULL,11),(153,2932,'/usr/local/bin/geckodriver',NULL,NULL,11),(154,2933,'/usr/local/bin/geckodriver',NULL,NULL,11),(155,NULL,'/bin/date',NULL,NULL,11),(156,NULL,'/usr/bin/python','/usr/local/razorsecure/agent/monitor/filemon_call.py',NULL,11),(157,NULL,'/usr/bin/python2.7','/usr/local/razorsecure/agent/monitor/filemon_call.py',NULL,11),(158,NULL,'/usr/local/razorsecure/agent/filemon_call',NULL,NULL,11),(159,NULL,'/usr/local/razorsecure/agent/packagemon_apt',NULL,NULL,11),(160,NULL,'/bin/radiomond',NULL,NULL,11),(161,NULL,'/usr/sbin/wanmanager',NULL,NULL,11),(162,NULL,'/usr/sbin/hermodd',NULL,NULL,11),(163, null,'/bin/gpsparser',null,null,11),(164,null,'chat',null,null,25),(165,null,'radiomond',null,null,25),(166,null,'/usr/bin/hotcli',null,null,11),(167,null,'/usr/bin/mawk',null,null,11),(168,null,'/bin/dash','hotcli',null,11),(169,null,'/usr/share/wanmanager2/link_supervisor',null,null,11),(170,null,'/usr/bin/host',null,null,11),(171,null,'/bin/ping',null,null,11),(172,null,'/usr/bin/timeout',null,null,11);
+        /*!40000 ALTER TABLE `monitor_filter` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `item_price`
+        --
+
+        LOCK TABLES `item_price` WRITE;
+        /*!40000 ALTER TABLE `item_price` DISABLE KEYS */;
+        INSERT INTO `item_price` VALUES (1,'standard_monitor','GBP',25.00),(2,'premium_monitor','GBP',25.00),(3,'standard_monitor','USD',30.00),(4,'premium_monitor','USD',30.00),(5,'standard_monitor','EUR',30.00),(6,'premium_monitor','EUR',30.00);
+        /*!40000 ALTER TABLE `item_price` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `permission_type`
+        --
+
+        LOCK TABLES `permission_type` WRITE;
+        /*!40000 ALTER TABLE `permission_type` DISABLE KEYS */;
+        INSERT INTO `permission_type` VALUES (1,'administrator','Administrator','Full Administration Rights'),(2,'manage_user','Manage User','Permission to manage the user data'),(3,'manage_servers','Manage Servers','Permission to manage server data'),(4,'manage_monitors','Manage Monitors','Permission to manage server monitor data'),(5,'view_history','View History','View server data history'),(6,'view_data','View Security Data','View active security data'),(7,'confirm_alerts','Confirm Alerts','Permission to confirm alerts'),(8,'comment_alerts','Comment Alerts','Permission to add comments to alerts');
+        /*!40000 ALTER TABLE `permission_type` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `payment_method_type`
+        --
+
+        LOCK TABLES `payment_method_type` WRITE;
+        /*!40000 ALTER TABLE `payment_method_type` DISABLE KEYS */;
+        INSERT INTO `payment_method_type` VALUES (1,'Credit Card',1),(2,'Paypal',1);
+        /*!40000 ALTER TABLE `payment_method_type` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `system_data_alert_default`
+        --
+
+        LOCK TABLES `system_data_alert_default` WRITE;
+        /*!40000 ALTER TABLE `system_data_alert_default` DISABLE KEYS */;
+        INSERT INTO `system_data_alert_default` VALUES (1,'CPU Usage','cpus','percent',NULL,100,5,'%',1,'1,9',NULL,NULL,NULL,1,NULL,NULL),(2,'Zombie Count','zombie_count',NULL,NULL,1,0,' Processes',1,'22',NULL,NULL,NULL,1,NULL,NULL),(10,'RazorSecure Running','razorsecure','',NULL,NULL,0,'',1,NULL,NULL,NULL,NULL,0,NULL,'2'),(4,'Disk Usage','disk','percent',NULL,90,0,'%',1,'7,10',NULL,NULL,NULL,1,NULL,NULL),(5,'Real Memory Usage','memory_real',NULL,NULL,80,0,'%',1,'2,8',NULL,NULL,NULL,1,'linux',NULL),(6,'Swap Memory Usage','memory_swap',NULL,NULL,20,0,'%',1,'2,8',NULL,NULL,NULL,1,'linux',NULL),(7,'Network Sent Usage','percent_sent','percent',NULL,90,5,'%',1,'11',NULL,NULL,NULL,1,NULL,NULL),(8,'Total CPU Usage','cpu',NULL,NULL,90,5,'%',1,'1,9',NULL,NULL,NULL,1,NULL,NULL),(9,'Network Recv Usage','percent_recv','percent_recv',NULL,90,5,'%',1,'11',NULL,NULL,NULL,1,NULL,NULL),(11,'Required Processes','required_processes',NULL,NULL,NULL,10,'',1,NULL,NULL,NULL,5,1,NULL,NULL),(12,'Web Stats','',NULL,NULL,NULL,0,'',0,'26,13,12,14,15',NULL,NULL,NULL,1,NULL,NULL),(13,'Available Updates','',NULL,NULL,NULL,0,'',1,NULL,NULL,NULL,NULL,0,NULL,'1'),(14,'RKHunter Output','',NULL,NULL,NULL,0,'',0,NULL,NULL,NULL,NULL,0,NULL,NULL),(15,'Real Memory Usage','memory_real',NULL,NULL,90,0,'%',1,'2,8',NULL,NULL,NULL,1,'windows',NULL),(16,'Swap Memory Usage','memory_swap',NULL,NULL,50,0,'%',1,'2,8',NULL,NULL,NULL,1,'windows',NULL);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 502 Status', 'http_codes', '502', 0, 0, '', 15);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 500 Status', 'http_codes', '500', 0, 0, '', 15);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 408 Status', 'http_codes', '408', 0, 0, '', 15);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 404 Status', 'http_codes', '404', 0, 0, '', 15);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 403 Status', 'http_codes', '403', 0, 0, '', 15);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 400 Status', 'http_codes', '400', 0, 0, '', 15);
+        INSERT INTO system_data_alert_default (nice_name, resource_name, value_name, active, can_configure, suffix, charts) VALUES ('Weblog 200 Status', 'http_codes', '200', 0, 0, '', 15);
+        /*!40000 ALTER TABLE `system_data_alert_default` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `command`
+        --
+
+        LOCK TABLES `command` WRITE;
+        /*!40000 ALTER TABLE `command` DISABLE KEYS */;
+        INSERT INTO `command`
+        VALUES (1, 'packagemon', 'execute_updates', 'Run Updates', 5, NULL, 'Maintenance due to package update command'),
+              (2, 'detect', '', 'Detect Configuration', NULL, NULL, NULL),
+              (3, 'commander', 'execute_ionode_increase', 'Increase Ionode Watchers', NULL, NULL, NULL),
+              (4, 'commander', 'execute_ssh_tunnel', 'Open SSH Tunnel', NULL, NULL, NULL),
+              (5, 'commander', 'terminate_ssh_tunnel', 'Close SSH Tunnel', NULL, NULL, NULL),
+              (6, 'commander', 'reboot_system', 'Reboot System', NULL, NULL, NULL),
+              (7, 'knock', 'active', 'Exit Lockdown', NULL, NULL, NULL),
+              (8, 'knock', 'lockdown', 'Lockdown', NULL, NULL, NULL),
+              (9, 'remotecomm', 'set_maintenance', 'Set Maintenance Mode', NULL, NULL, NULL),
+              (10, 'remotecomm', 'update_baseline', 'Update Baseline', NULL, NULL, NULL),
+              (11, 'learning', 'start_learning', 'Enable learning mode', NULL, NULL, NULL),
+              (13, 'remotecomm', 'get_baseline', 'Request Baseline Data', NULL, NULL, NULL),
+              (14, 'remotecomm', 'end_maintenance', 'Ends Maintenance Mode', NULL, NULL, NULL),
+              (15, 'alert.log', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (16, 'alert.log.1.gz', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (20, 'agent.log', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (21, 'agent.log.1.gz', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (25, 'razorsecure-processor.log', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),      # Old hosts had a different processor log name.
+              (26, 'razorsecure-processor.log.1.gz', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL), # Old hosts had a different processor log name.
+              (30, 'install.log', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (31, 'install.log.1.gz', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (35, 'processor.log', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (36, 'processor.log.1.gz', 'log_request', 'Request RazorSecure logs', NULL, NULL, NULL),
+              (37, 'remotecomm', 'delete_baseline', 'Delete Baseline', 5, NULL, 'Baseline Refresh'),
+              (38, 'walk', 'snmp_command', 'SNMP walk', NULL, NULL, NULL),
+              (39, 'scan', 'snmp_command', 'SNMP scan', NULL, NULL, NULL),
+              (40, 'scanwalk', 'snmp_command', 'SNMP scan and walk', NULL, NULL, NULL);
+        /*!40000 ALTER TABLE `command`
+            ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `chart_type`
+        --
+
+        LOCK TABLES `chart_type` WRITE;
+        /*!40000 ALTER TABLE `chart_type` DISABLE KEYS */;
+        INSERT INTO `chart_type` VALUES (1,'2014-10-19 21:21:54','Host Total CPU Usage','[\"created\", \"cpu\"]','created','top_cpu_proc','','Created','Percent',1,1),(2,'2014-10-19 21:21:54','Host Used Memory','[\"created\", \"memory_real\", \"memory_swap\"]','created','top_mem_proc','','Created','Percent',5,1),(3,'2014-10-19 21:21:54','Host File Descriptors','[\"created\", \"open_fd\"]','created','','','Created','Open Files',NULL,1),(4,'2014-10-19 21:21:54','Host Most Used Disk Parition','[\"created\", \"min_free_disk_percent\"]','created','','','Created','Percent',4,1),(5,'2014-10-19 21:21:54','Host Disk IO','[\"created\", \"total_write_disk\", \"total_read_disk\"]','created','top_io_proc','','Created','Rate kb/s',4,1),(6,'2014-10-19 21:21:54','Host Net IO','[\"created\", \"total_sent_net\", \"total_recv_net\"]','created','','','Created','Rate kb/s',NULL,1),(7,'2014-10-19 21:21:54','Free Disk Space','[\"created\", \"percent\"]','created','','part','Created','Percent',NULL,1),(8,'2014-10-19 21:21:54','Host Used Memory','[\"created\", \"total\", \"used\"]','created','','type','Created','Size (MB)',NULL,1),(9,'2014-10-19 21:21:54','Host CPU Usage','[\"created\", \"percent\"]','created','','cpu_id','Created','Percent',NULL,1),(10,'2014-10-19 21:21:54','Host Disk IO by Interface','[\"created\", \"read_count\", \"read_bytes\", \"write_count\", \"write_bytes\"]','created','','part','Created','Rate kb/s',NULL,1),(11,'2014-10-19 21:21:54','Host Net IO by Interface','[\"created\", \"bytes_recv\", \"packets_recv\", \"bytes_sent\", \"packets_sent\"]','created','','part','Created','Rate kb/s',NULL,1),(12,'2014-11-02 13:07:40','Web Hits Per Second','[\"created\", \"hit_rate\"]','created','hit_rate','','Created','Hits Per Second',12,1),(13,'2014-11-02 13:08:20','Web Transfer','[\"created\", \"bytes_sent_rate\"]','created','bytes_sent_rate','','Created','Bytes Per Second',NULL,1),(14,'2014-11-02 13:08:51','Web Process Time','[\"created\", \"process_time\"]','created','process_time','','Created','Time Spent Processing',NULL,1),(15,'2014-11-17 20:17:53','HTTP Code Results','[\"created\", \"http_code\"]','created','http_code','','Created','HTTP Status',NULL,1),(16,'2015-01-17 13:09:43','KB Sent Per Port','[\"created\", \"bytes_sent\"]','created','bytes_sent','','Created','KBytes Sent',NULL,1),(17,'2015-01-17 13:10:05','KB Recv Per Port','[\"created\", \"bytes_recv\"]','created','bytes_recv','','Created','KBytes Recv',NULL,1),(18,'2015-01-20 21:12:21','Remote Web Access Time','[\"created\", \"process_time\"]','created','process_time','','Created','Process Time',NULL,1),(19,'2015-01-20 21:12:54','Remote Web Access Result','[\"created\", \"result\"]','created','result','','Created','Result',NULL,1),(21,'2015-01-22 22:38:53','Host Disk Usage Per Mount','[\"created\", \"percent\"]','created','percent','','Created','Percent',NULL,1),(22,'2015-01-22 22:39:51','Zombies','[\"created\", \"zombies\"]','created','zombies','','Created','Zombies',NULL,1),(23,'2015-01-28 21:25:08','MySQL: Queries Per Second','[\"created\", \"queries\"]','created','queries','','Created','Queries',NULL,1),(24,'2015-01-28 21:25:45','MySQL: Network Usage','[\"created\", \"bytes_received\", \"bytes_sent\", \"connections\"]','created','connections','','Created','Network IO',NULL,1),(25,'2015-02-07 19:52:45','Last 7 Days Syslog','[\"created\", \"count\"]','created','count','','Date','Logs',NULL,0),(26,'2015-02-11 19:34:38','Web Errors','[\"created\", \"errors\"]','created','errors','','Created','Errors',NULL,1),(27,'2016-05-04 13:35:29','Ping Time','[\"created\", \"ping\"]','created','ping','','Created','Ping Time',NULL,1),(28,'2016-05-04 13:36:00','Bandwidth','[\"created\", \"bandwidth\"]','created','bandwidth','','Created','Bandwidth (bps)',NULL,1);
+        /*!40000 ALTER TABLE `chart_type` ENABLE KEYS */;
+        UNLOCK TABLES;
+
+        --
+        -- Dumping data for table `monitor_type_variable`
+        --
+
+        LOCK TABLES `monitor_type_variable` WRITE;
+        /*!40000 ALTER TABLE `monitor_type_variable`
+            DISABLE KEYS */;
+        INSERT INTO `monitor_type_variable`
+        VALUES (1, 3, 'monitor_file',
+                '/etc/sysconfig,/boot,/lib/modules,/etc/resolv.conf,/etc/shadow,/etc/passwd,/etc/host.conf,/etc/init.d,/etc/init,/etc/services,/etc/rsyslog.d,/etc/rsyslog.conf,/etc/sysctl.conf,/etc/sudoers,/etc/group,/etc/gshadow',
+                'list', 'file', 'linux', 'redhat'),
+              (2, 4, 'monitor_file', '/proc/net/tcp,/proc/net/udp,/proc/net/tcp6,/proc/net/udp6', 'list', 'file', NULL, NULL),
+              (3, 5, 'monitor_file', '/var/lib/yum', 'list', 'file', 'linux', 'redhat'),
+              (4, 6, 'monitor_file', '/etc/yum.repos.d,/var/lib/yum/repos', 'list', 'file', 'linux', 'redhat'),
+              (5, 8, 'monitor_file', '/var/run/utmp', 'list', 'file', NULL, NULL),
+              (12, 19, 'monitor_file', '/funcom/local/html', 'list', 'file', NULL, NULL),
+              (13, 23, 'monitor_file', '/var/log/nginx/access.log', 'list', 'file', NULL, NULL),
+              (14, 25, 'monitor_file', '/var/log/secure,/var/log/messages,/var/log/syslog,/var/log/auth.log', 'list', 'file', NULL, NULL),
+              (15, 26, 'monitor_file', '', 'list', 'file', NULL, NULL),
+              (35, 26, 'exclude_type', 'txt,log,out', 'list', 'extension', NULL, NULL),
+              (52, 28, 'monitor_file', '/boot,/lib/modules,/test', 'list', 'file', NULL, NULL),
+              (54, 30, 'monitor_file', '/var/spool/cron/,/etc/crontab,/etc/cron.d/', 'list', 'file', NULL, NULL),
+              (55, 32, 'monitor_file', '/var/log/audit/audit.log', 'list', 'file', NULL, NULL),
+              (56, 33, 'monitor_file', '/etc/passwd,/etc/groups', 'list', 'file', NULL, NULL),
+              (57, 5, 'monitor_file', '/var/lib/apt', 'list', 'file', 'linux', 'debian'),
+              (58, 6, 'monitor_file', '/etc/apt', 'list', 'file', 'linux', 'debian'),
+              (59, 3, 'monitor_file',
+                '/boot,/lib/modules,/etc/modules-load.d,/etc/resolv.conf,/etc/shadow,/etc/passwd,/etc/host.conf,/etc/network,/etc/init.d,/etc/init,/etc/services,/etc/rsyslog.d,/etc/rsyslog.conf,/etc/sysctl.conf,/etc/sudoers,/etc/group,/etc/gshadow',
+                'list', 'file', 'linux', 'debian'),
+              (60, 3, 'monitor_file',
+                '/lib/modules,/lib/modules-load.d,/etc/modules-load.d,/etc/resolv.conf,/etc/shadow,/etc/passwd,/etc/host.conf,/etc/network,/etc/init.d,/etc/init,/etc/services,/etc/rsyslog.d,/etc/rsyslog.conf,/etc/sysctl.conf,/etc/sudoers,/etc/group,/etc/gshadow',
+                'list', 'file', 'linux', 'arch'),
+              (61, 5, 'monitor_file', '/var/lib/pacman', 'list', 'file', 'linux', 'arch'),
+              (62, 6, 'monitor_file', '/etc/pacman.d,/etc/pacman.conf', 'list', 'file', 'linux', 'arch'),
+              (63, 6, 'monitor_file', '/etc/portage', 'list', 'file', 'linux', 'gentoo'),
+              (64, 5, 'monitor_file', '/var/lib/portage', 'list', 'file', 'linux', 'gentoo'),
+              (65, 3, 'monitor_file',
+                '/lib/modules,/etc/resolv.conf,/etc/shadow,/etc/passwd,/etc/host.conf,/etc/conf.d,/etc/env.d,/etc/modprobe.d,/etc/init.d,/etc/init,/etc/services,/etc/rsyslog.d,/etc/rsyslog.conf,/etc/sysctl.conf,/etc/sudoers,/etc/group,/etc/gshadow',
+                'list', 'file', 'linux', 'gentoo'),
+              (66, 3, 'monitor_file',
+                '/lib/modules,/etc/resolv.conf,/etc/shadow,/etc/passwd,/etc/host.conf,/etc/conf.d,/etc/env.d,/etc/modprobe.d,/etc/init.d,/etc/init,/etc/services,/etc/rsyslog.d,/etc/rsyslog.conf,/etc/sysctl.conf,/etc/sudoers,/etc/group,/etc/gshadow',
+                'list', 'file', 'linux', 'unknown'),
+              (67, 3, 'monitor_file',
+                '{windows_dir}\\System32\\drivers,{windows_dir}\\System32\\GroupPolicy,{windows_dir}\\System32\\GroupPolicyUsers,{windows_dir}\\System32\\manifeststore,{windows_dir}\\Boot,{windows_dir}\\ehome',
+                'list', 'file', 'windows', NULL),
+              (68, 5, 'monitor_type', 'interval', '', 'string', 'windows', NULL),
+              (69, 33, 'monitor_type', 'interval', '', 'string', 'windows', NULL),
+              (70, 8, 'monitor_type', 'interval', '', 'string', 'windows', NULL);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'port_scan_port_hits', '10', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'port_scan_frequency', '30', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'dos_max_connections', '500', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'routes_callback_interval', '500', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'dos_callback_interval', '10', 'integer', 'integer', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'dos_max_packets', '15000', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'dos_max_data', '50000000', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'network_reporter', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'network_processor', True, 'boolean', 'boolean', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'anonymize', True, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 25, 'anonymize', True, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 8, 'anonymize', True, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 47, 'gps_send_interval', '30', 'integer', 'integer', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 47, 'max_gps_speed', '400', 'integer', 'integer', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 21, 'suppress_alerts', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 25, 'suppress_alerts', False, 'boolean', 'boolean', null, null);
+        # Adding this for filemon here as it does have an alert function, however it is not currently used.
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 28, 'suppress_alerts', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'suppress_alerts', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 47, 'suppress_alerts', True, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 50, 'suppress_alerts', False, 'boolean', 'boolean', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 50, 'callback_interval', '30', 'integer', 'integer', null, null);
+
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 49, 'host_file_location', '/etc/hosts', 'string', 'string', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 20, 'anomaly_detector_active', False, 'boolean', 'boolean', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 51, 'targets', '[]', 'string', 'string', 'linux', null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 7, 'disk_ignore_prefix', '', 'list', 'list', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 7, 'interface_ignore_prefix', '', 'list', 'list', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 20, 'disk_ignore_prefix', '', 'list', 'list', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 20, 'interface_ignore_prefix', 'veth,br-', 'list', 'list', 'linux', null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 0, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 1, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 3, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 4, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 5, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 6, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 7, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 8, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 9, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 10, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 11, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 19, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 20, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 21, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 22, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 23, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 24, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 25, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 26, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 27, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 28, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 30, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 31, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 32, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 33, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 34, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 35, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 36, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 37, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 38, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 39, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 40, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 41, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 42, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 44, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 45, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 46, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 47, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 48, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 49, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 50, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 51, 'skip_local_processing', False, 'boolean', 'boolean', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 11, 'disable_process_checksum', False, 'boolean', 'boolean', null, null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 11, 'disable_parent_checksum', False, 'boolean', 'boolean', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 20, 'enable_gc_get_objects', False, 'boolean', 'boolean', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 43, 'dos_portscan_subnets', '', 'list', 'subnet', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 3, 'recursive_monitoring', False, 'boolean', 'boolean', null, null);
+
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 52, 'ip_addresses', '', 'list', 'list', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 52, 'timeout_in_seconds', '1', 'integer', 'integer', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 52, 'aggregation_count', '60', 'integer', 'integer', 'linux', null);
+        INSERT INTO monitor_type_variable(id, monitor_type_id, name, value, data_type, variable_type, valid_os, valid_distro) VALUES (null, 52, 'scan_frequency_per_minute', '6', 'integer', 'integer', 'linux', null);
+
+
+        LOCK TABLES `alert_descriptions` WRITE;
+        INSERT INTO `alert_descriptions` VALUES (0, '', ''),
+        (1, 'Packet Flood Detected', "A packet flood is an event caused by another device sending a very large number of packets to the host. If this is a malicious event it is an attempt to stop the device from functioning by providing so many packets that it is overwhelmed."),
+        (2, 'Port Scan', "A network port is a number that identifies one side of a connection between two computers. Computers use port numbers to determine to which process or application a message should be delivered. RazorSecure monitors all ports and which applications are using which port. We then alert if an application is using a port it previously hasn't, or if a new process opens a port"),
+        (3, 'Attempted Login', "This alert indicates that a User has attempted, failed or successfully logged into the system."),
+        (4, 'GPS Irregularity', "GPS allows small electronic receivers to determine their location (longitude, latitude, and altitude/elevation) to high precision (within a few metres) using time signals transmitted along a line of sight by radio from satellites. RazorSecure monitors the location of the host and will alert when the speed passes a threshold. A GPS alert can indicate a spoof is happening, but it can also be the result of reconnecting to a satellite after losing connection."),
+        (5, 'Unusual File Activity',  "RazorSecure monitors many important system folders that are used to keep the system running correctly and in a safe manor. Changes made in a folder that may cause this alert include making a new file, editing a file or changing the attributes of a file."),
+        (6, 'Unusual Network Port Activity', "A network port is a number that identifies one side of a connection between two computers. Computers use port numbers to determine to which process or application a message should be delivered. Razorsecure monitors all ports and which applications are using which port. We then alert if an application is using a port it previously hasn't, or if a new process opens a port."),
+        (7, 'Unknown IP Tables Change', "Netfilter offers various functions and operations for packet filtering, network address translation, and port translation, which provide the functionality required for directing packets through a network, as well as for providing ability to prohibit packets from reaching sensitive locations within a computer network. IPTables refers to the IPv4 rules and is monitored as a method to detect changes to these which could be maliciously or erroneously used to bypass security mechanisms."),
+        (8, 'Unusual Cron Change', "Cron is used to schedule jobs (commands or shell scripts) to run periodically at fixed times, dates, or intervals. It typically automates system maintenance or administration. RazorSecure monitors the instruction set which tells cron what scripts to run."),
+        (9, 'Repositories Changed', "Package repositories are remote or local sources that packages can be installed or updated from. Changes to these can cause packages to be loaded into the system from malicious sources."),
+        (10, 'Packages Changed', "A package is a compressed file archive containing all of the files that come with a particular application. Razorsecure monitors packages installed or removed on the host and will alert when one is changed outside of a maintenance window."),
+        (11, 'Unusual User Login', "This alert detects when a new user successfully logs in and also when an unsuccessful attempt occurs."),
+        (12, 'Unknown USB Device', "USB covers a wide range of device classes. These include USB connectors like thumb drives or a keyboard, but can also include internal connectors within computers, for example antennas or sim card connectors. Razorsecure monitors all USB ports and will alert when a new device is added, changed or removed."),
+        (13, 'System Changed', "File system and network adaptors are mounted as devices in linux systems. Changes to these devices are monitored for abnormal behaviour."),
+        (14, 'Unusual Process', "In computing, a process is an instance of a computer program that is being executed. It contains the program code and its activity. A process may be made up of multiple threads of execution that execute instructions concurrently. Each process may create many child processes but will have at most one parent process. RazorSecure monitors each process and its attributes as well as child/parent relationships to detect abnormal changes to process which are alerted."),
+        (15, 'Users Changed', "A system user has been added, removed or changed."),
+        (16, 'User Groups Changed', "A user's account allows a user to authenticate to a system and potentially to receive authorization to access resources provided by or connected to that system. Changes to user accounts could provide attackers with access to the system and so is monitored for abnormal activity."),
+        (17, 'Unusual Service', "This alert indicates that the list of services/processes that start during system boot has been changed"),
+        (18, 'Attempted Login', "This alert indicates that a system users password has been changed."),
+        (19, 'New Network Route', "This alert indicates that a new network route has been detected. This occurs when RazorSecure detects network traffic on a route between interfaces that does not normally occur. This could indicate that a firewall has been circumvented or a hacker is attempting access."),
+        (20, 'Host file changed', "This alert indicates that the host file has been modified, and hostnames now point to a different IP address."),
+        (22, 'System Resource Anomaly', "Our behavioural models indicate anomalous behaviour in the indicated system resources."),
+        (23, 'System Time Change', "This alert indicates that the system time has changed by some amount. Large changes so system time can cause crytography certificates to work incorrectly."),
+        (24, 'ARP Change', "This alert indicates that a device (MAC Address) has not been seen before with this IP address or that two devices have the same IP address which could mean that an ARP poisoning attack has occurred."),
+        (25, 'SNMP Change', "This alert indicates that an SNMP enabled device monitor by razorsecure has had a variable change outside of known values. This could indicate an attacker has access to said device");
+        UNLOCK TABLES;
+
+        /*!40000 ALTER TABLE `monitor_type_variable` ENABLE KEYS */;
+        UNLOCK TABLES;
+        /*!40103 SET TIME_ZONE=@
+
+        OLD_TIME_ZONE */;
+
+        /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+        /*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+        /*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
+        /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+        /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+        /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+        /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+        COMMIT;
+        -- Dump completed on 2017-08-30 10:38:18
+
+      30_add_test_data.sql: |
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "alex-test@razorsecure.com", "1e1aad1fdf544447cb4277c16b94e9fb922e83306a3c6a927219b2357ab15497", "alex@razorsecure.com", NOW(), 0, "us", "en", "", 1, NULL, NULL, 0, "d7fc3c0a4d9a06dacd4f474ce319b5838df9b1cc", "e19b01278929b1ae6d4b2226b13784591088d2cc", NULL, 5, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date, integrations)
+        VALUES (NULL, "test@razorsecure.com", "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225", "test@razorsecure.com", NOW(), 0, "gb", "en", "GBP", 1, NULL, NULL, NULL, "8e0a065422071c4bedf63c511cc842896944fcec", "5b298acac14622d1c9263a69777da0933b11d994", NULL, 80, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL, "{\"features\":{\"timeline\":true,\"securityDashboard\":true, \"userManagement\":true}}");
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "test@test.com", "6fec2a9601d5b3581c94f2150fc07fa3d6e45808079428354b868e412b76e6bb", "test@test.com", NOW(), 0, "gb", "en", "GBP", 1, NULL, NULL, NULL, "601c3afb9f3f54c47a8da2659abb5dec5ded37a4", "55c7658c6de79a3980bfc36e6395a1e505b611a2", NULL, 50, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "lewis@razorsecure.com", "37268335dd6931045bdcdf92623ff819a64244b53d0e746d438797349d4da578", "lewis@razorsecure.com", NOW(), 0, "gb", "en", "GBP", 1, NULL, NULL, NULL, "facf1b37f732f9f6a0616fff61419e072ee11f32", "7583966b887635bc36ce893bd411f937fd0fc780", NULL, 5, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "matt@razorsecure.com", "adf6adb55e768173c987a1336a1da221e43e42deb09eebe53d56f257bf73f00e", "matt@razorsecure.com", NOW(), 0, "us", "en", "GBP", 1, NULL, NULL, NULL, "1f1ff72dff362c82bc9dd5afc97204d92713ea09", "612f5c3dd146fb518a508db3a482042f5459bdca", NULL, 5, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "daniel@razorsecure.com", "7e071fd9b023ed8f18458a73613a0834f6220bd5cc50357ba3493c6040a9ea8c", "dan@razorsecure.com", NOW(), 0, "us", "en", "GBP", 1, NULL, NULL, NULL, "3281bea3b38d7bf7d62021eda82f75f5a8eb2aeb", "f606141beca3f53e3b1463113cf6acb1831c31f4", NULL, 10, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "liam@razorsecure.com", "d333bfdfb8e35b6215680fd17218912c519e6f0853b2ea5bbb85a60e33433b26", "liam@razorsecure.com", NOW(), 0, "gb", "en", "GBP", 1, NULL, NULL, NULL, "ba7c8b6582e0a327bb0e14629a3cf6a8953e745a", "23eb24c89ebc27ac18fb220715978448de7987f3", NULL, 80, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO customer (id, username, password, email, created, features, country, language, currency, email_verified, first_paid, first_login, referrer_id, api_code, api_key, password_reset_hash, max_monitors, ip_address, alert_type_id, alert_frequency, standard_monitor_free, premium_monitor_free, standard_monitor_intent, premium_monitor_intent,  discount,  cancelled_date)
+        VALUES (NULL, "jessica@razorsecure.com", "ac5faf99df2f08c1887fe0b8f8f53dc36e502ee0b275299810e03199fe038fb4", "jessica@razorsecure.com", NOW(), 0, "gb", "en", "GBP", 1, NULL, NULL, NULL, "eab3863d17a6c21836593cbd70df25557b75c297", "e4adc6713abcad84f16f32dde6d369d89d6ead03", NULL, 80, "127.0.0.1", 1, 0, 3, 0, NULL, NULL, 0, NULL);
+
+        INSERT INTO host_tag_group(customer_id, hosts, tag, sort) VALUES (LAST_INSERT_ID(), 0, 'all', 0), (LAST_INSERT_ID(), 0, 'webserver', 1), (LAST_INSERT_ID(), 0, 'database', 2);
+
+        COMMIT;
+
+
+    auth:
+      rootPassword: sBd7PI1K8u
+      database: "main"
